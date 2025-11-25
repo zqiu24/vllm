@@ -34,6 +34,7 @@ from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
+from .oft import OFTConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
@@ -80,6 +81,8 @@ class VllmConfig:
     """Load configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
+    oft_config: OFTConfig | None = None
+    """OFT configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
     structured_outputs_config: StructuredOutputsConfig = Field(
@@ -163,6 +166,14 @@ class VllmConfig:
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
             # LoRA creates static buffers based on max_num_batched_tokens.
+            # The tensor sizes and strides get captured in the torch.compile
+            # graph explicitly.
+            vllm_factors.append(str(self.scheduler_config.max_num_batched_tokens))
+        else:
+            vllm_factors.append("None")
+        if self.oft_config:
+            vllm_factors.append(self.oft_config.compute_hash())
+            # OFT creates static buffers based on max_num_batched_tokens.
             # The tensor sizes and strides get captured in the torch.compile
             # graph explicitly.
             vllm_factors.append(str(self.scheduler_config.max_num_batched_tokens))
@@ -355,6 +366,9 @@ class VllmConfig:
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
+        
+        if self.oft_config is not None:
+            self.oft_config.verify_with_model_config(self.model_config)
 
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(

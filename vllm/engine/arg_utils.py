@@ -44,6 +44,7 @@ from vllm.config import (
     KVTransferConfig,
     LoadConfig,
     LoRAConfig,
+    OFTConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -484,6 +485,14 @@ class EngineArgs:
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
+    # OFT fields
+    enable_oft: bool = False
+    max_ofts: int = OFTConfig.max_ofts
+    max_oft_block_size: int = OFTConfig.max_oft_block_size
+    default_mm_ofts: dict[str, str] | None = OFTConfig.default_mm_ofts
+    fully_sharded_ofts: bool = OFTConfig.fully_sharded_ofts
+    max_cpu_ofts: int | None = OFTConfig.max_cpu_ofts
+    oft_dtype: str | torch.dtype | None = OFTConfig.oft_dtype
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -1019,6 +1028,29 @@ class EngineArgs:
             "--fully-sharded-loras", **lora_kwargs["fully_sharded_loras"]
         )
         lora_group.add_argument("--default-mm-loras", **lora_kwargs["default_mm_loras"])
+
+        # OFT related configs
+        oft_kwargs = get_kwargs(OFTConfig)
+        oft_group = parser.add_argument_group(
+            title="OFTConfig",
+            description=OFTConfig.__doc__,
+        )
+        oft_group.add_argument(
+            "--enable-oft",
+            action=argparse.BooleanOptionalAction,
+            help="If True, enable handling of OFT adapters.",
+        )
+        oft_group.add_argument("--max-ofts", **oft_kwargs["max_ofts"])
+        oft_group.add_argument("--max-oft-block-size", **oft_kwargs["max_oft_block_size"])
+        oft_group.add_argument(
+            "--oft-dtype",
+            **oft_kwargs["oft_dtype"],
+        )
+        oft_group.add_argument("--max-cpu-ofts", **oft_kwargs["max_cpu_ofts"])
+        oft_group.add_argument(
+            "--fully-sharded-ofts", **oft_kwargs["fully_sharded_ofts"]
+        )
+        oft_group.add_argument("--default-mm-ofts", **oft_kwargs["default_mm_ofts"])
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1670,6 +1702,12 @@ class EngineArgs:
                 "non multimodal model"
             )
 
+        if not model_config.is_multimodal_model and self.default_mm_ofts:
+            raise ValueError(
+                "Default modality-specific OFT(s) were provided for a "
+                "non multimodal model"
+            )
+
         lora_config = (
             LoRAConfig(
                 max_lora_rank=self.max_lora_rank,
@@ -1685,8 +1723,37 @@ class EngineArgs:
             else None
         )
 
+        oft_config = (
+            OFTConfig(
+                max_oft_block_size=self.max_oft_block_size,
+                max_ofts=self.max_ofts,
+                default_mm_ofts=self.default_mm_ofts,
+                fully_sharded_ofts=self.fully_sharded_ofts,
+                oft_dtype=self.oft_dtype,
+                max_cpu_ofts=self.max_cpu_ofts
+                if self.max_cpu_ofts and self.max_cpu_ofts > 0
+                else None,
+            )
+            if self.enable_oft
+            else None
+        )
+
         if (
             lora_config is not None
+            and speculative_config is not None
+            and scheduler_config.max_num_batched_tokens
+            < (
+                scheduler_config.max_num_seqs
+                * (speculative_config.num_speculative_tokens + 1)
+            )
+        ):
+            raise ValueError(
+                "Consider increasing max_num_batched_tokens or "
+                "decreasing num_speculative_tokens"
+            )
+  
+        if (
+            oft_config is not None
             and speculative_config is not None
             and scheduler_config.max_num_batched_tokens
             < (
@@ -1773,6 +1840,7 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
+            oft_config=oft_config,
             speculative_config=speculative_config,
             load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,

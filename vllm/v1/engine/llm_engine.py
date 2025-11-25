@@ -17,6 +17,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.oft.request import OFTRequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
@@ -217,6 +218,7 @@ class LLMEngine:
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
+        oft_request: OFTRequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
@@ -241,6 +243,7 @@ class LLMEngine:
                 params,
                 arrival_time,
                 lora_request,
+                oft_request,
                 tokenization_kwargs,
                 trace_headers,
                 priority,
@@ -388,6 +391,22 @@ class LLMEngine:
         """Prevent an adapter from being evicted."""
         return self.engine_core.pin_lora(lora_id)
 
+    def add_oft(self, oft_request: OFTRequest) -> bool:
+        """Load a new OFT adapter into the engine for future requests."""
+        return self.engine_core.add_oft(oft_request)
+
+    def remove_oft(self, oft_id: int) -> bool:
+        """Remove an already loaded OFT adapter."""
+        return self.engine_core.remove_oft(oft_id)
+
+    def list_ofts(self) -> set[int]:
+        """List all registered adapters."""
+        return self.engine_core.list_ofts()
+
+    def pin_oft(self, oft_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return self.engine_core.pin_oft(oft_id)
+        
     def collective_rpc(
         self,
         method: str | Callable[[WorkerBase], _R],
