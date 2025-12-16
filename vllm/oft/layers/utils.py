@@ -8,7 +8,7 @@ import torch.nn as nn
 
 
 @dataclass
-class LoRAMapping:
+class OFTMapping:
     index_mapping: tuple[int, ...]
     prompt_mapping: tuple[int, ...]
     is_prefill: bool = False
@@ -18,9 +18,9 @@ class LoRAMapping:
         self.prompt_mapping = tuple(self.prompt_mapping)
 
 
-def _get_lora_device(base_layer: nn.Module) -> torch.device:
+def _get_oft_device(base_layer: nn.Module) -> torch.device:
     # code borrowed from https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/vllm/lora/layers.py#L34
-    """Returns the device for where to place the LoRA tensors."""
+    """Returns the device for where to place the OFT tensors."""
     # unquantizedLinear
     if hasattr(base_layer, "weight"):
         return base_layer.weight.device
@@ -39,13 +39,13 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
 
 def _not_fully_sharded_can_replace(can_replace):
     """
-    decorator which adds the condition of not using fully sharded loras
+    decorator which adds the condition of not using fully sharded ofts
     intended to wrap can_replace_layer()
     """
 
     def dec(*args, **kwargs):
         decorate = kwargs.pop("decorate") if "decorate" in kwargs else True
-        condition = not kwargs["lora_config"].fully_sharded_loras if decorate else True
+        condition = not kwargs["oft_config"].fully_sharded_ofts if decorate else True
         return can_replace(*args, **kwargs) and condition
 
     return dec
@@ -53,13 +53,13 @@ def _not_fully_sharded_can_replace(can_replace):
 
 def _fully_sharded_can_replace(can_replace):
     """
-    decorator which adds the condition of fully sharded loras
+    decorator which adds the condition of fully sharded ofts
     intended to wrap can_replace_layer()
     """
 
     def dec(*args, **kwargs):
         return (
-            can_replace(*args, **kwargs) and kwargs["lora_config"].fully_sharded_loras
+            can_replace(*args, **kwargs) and kwargs["oft_config"].fully_sharded_ofts
         )
 
     return dec

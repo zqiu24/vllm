@@ -7,14 +7,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config.lora import LoRAConfig
+from vllm.config.oft import OFTConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 
-from .base import BaseLayerWithLoRA
+from .base import BaseLayerWithOFT
 
 
-class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
+class VocabParallelEmbeddingWithOFT(BaseLayerWithOFT):
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
@@ -24,7 +24,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def create_lora_weights(
         self,
         max_loras: int,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
         if self.base_layer.num_added_embeddings_per_partition > 0:
@@ -50,9 +50,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             (
                 max_loras,
                 self.base_layer.org_vocab_size,
-                lora_config.max_lora_rank,
+                oft_config.max_lora_rank,
             ),
-            dtype=lora_config.lora_dtype,
+            dtype=oft_config.lora_dtype,
             device=self.base_layer.weight.device,
         )
         self.lora_b_stacked = torch.zeros(
@@ -60,9 +60,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 max_loras,
                 1,
                 self.base_layer.embedding_dim,
-                lora_config.max_lora_rank,
+                oft_config.max_lora_rank,
             ),
-            dtype=lora_config.lora_dtype,
+            dtype=oft_config.lora_dtype,
             device=self.base_layer.weight.device,
         )
         self.lora_a_stacked_2d = self.lora_a_stacked.view(
@@ -70,17 +70,16 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.lora_a_stacked.shape[2],
         )
 
-    def reset_lora(self, index: int):
+    def reset_oft(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
 
-    def set_lora(
+    def set_oft(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        oft_R: torch.Tensor,
     ):
-        self.reset_lora(index)
+        self.reset_oft(index)
         # NOTE self.lora_a_stacked is row-major, and lora_a is col-major,
         # so we need transpose here
         self.lora_a_stacked[index, : lora_a.shape[1], : lora_a.shape[0]].copy_(
@@ -126,7 +125,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:

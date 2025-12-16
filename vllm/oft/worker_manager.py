@@ -8,26 +8,26 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.lora.models import (
-    LoRAModel,
-    LoRAModelManager,
-    LRUCacheLoRAModelManager,
-    create_lora_manager,
+from vllm.oft.models import (
+    OFTModel,
+    OFTModelManager,
+    LRUCacheOFTModelManager,
+    create_oft_manager,
 )
-from vllm.lora.peft_helper import PEFTHelper
-from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
+from vllm.oft.peft_helper import PEFTHelper
+from vllm.oft.request import OFTRequest
+from vllm.oft.utils import get_adapter_absolute_path
 
 logger = init_logger(__name__)
 
 
-class WorkerLoRAManager:
-    """WorkerLoRAManager that manages LoRA models on the worker side.
+class WorkerOFTManager:
+    """WorkerOFTManager that manages OFT models on the worker side.
 
-    Every request, the requested LoRAs will be loaded (unless they are already
-    loaded), and every other LoRA will be unloaded."""
+    Every request, the requested OFTs will be loaded (unless they are already
+    loaded), and every other OFT will be unloaded."""
 
-    _manager_cls: type[LoRAModelManager] = LoRAModelManager
+    _manager_cls: type[OFTModelManager] = OFTModelManager
 
     def __init__(
         self,
@@ -35,96 +35,96 @@ class WorkerLoRAManager:
         device: torch.device,
         embedding_modules: dict[str, str],
         embedding_padding_modules: list[str],
-        lora_model_cls: type[LoRAModel] = LoRAModel,
+        oft_model_cls: type[OFTModel] = OFTModel,
     ):
-        self._lora_model_cls = lora_model_cls
+        self._oft_model_cls = oft_model_cls
         self.embedding_modules = embedding_modules
         self.embedding_padding_modules = embedding_padding_modules
-        self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
+        self._cached_dummy_oft: None | Literal[False] | OFTModel = False
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.lora_config = vllm_config.lora_config
+        self.oft_config = vllm_config.oft_config
 
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
 
         self.max_position_embeddings = text_config.max_position_embeddings
         self.device = device
-        # Lazily initialized by create_lora_manager.
-        self._adapter_manager: LoRAModelManager
+        # Lazily initialized by create_oft_manager.
+        self._adapter_manager: OFTModelManager
 
     @contextmanager
-    def dummy_lora_cache(self):
-        """Use this context manager to reuse the dummy lora model
+    def dummy_oft_cache(self):
+        """Use this context manager to reuse the dummy oft model
         to avoid creating it repeatedly."""
-        self._cached_dummy_lora = None
+        self._cached_dummy_oft = None
         yield
-        self._cached_dummy_lora = False
+        self._cached_dummy_oft = False
 
     @property
     def is_enabled(self) -> bool:
         return True
 
-    def create_lora_manager(
+    def create_oft_manager(
         self,
         model: torch.nn.Module,
     ) -> Any:
-        lora_manager = create_lora_manager(
+        oft_manager = create_oft_manager(
             model,
             max_num_seqs=self.max_num_seqs,
             max_num_batched_tokens=self.max_num_batched_tokens,
             vocab_size=self.vocab_size,
-            lora_config=self.lora_config,
+            oft_config=self.oft_config,
             device=self.device,
-            lora_manager_cls=self._manager_cls,
+            oft_manager_cls=self._manager_cls,
         )
-        self._adapter_manager = lora_manager
-        return lora_manager.model
+        self._adapter_manager = oft_manager
+        return oft_manager.model
 
-    def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
+    def _load_adapter(self, oft_request: OFTRequest) -> OFTModel:
         try:
-            supported_lora_modules = self._adapter_manager.supported_lora_modules
+            supported_oft_modules = self._adapter_manager.supported_oft_modules
             packed_modules_mapping = self._adapter_manager.packed_modules_mapping
-            expected_lora_modules: list[str] = []
-            for module in supported_lora_modules:
+            expected_oft_modules: list[str] = []
+            for module in supported_oft_modules:
                 if module in packed_modules_mapping:
-                    expected_lora_modules.extend(packed_modules_mapping[module])
+                    expected_oft_modules.extend(packed_modules_mapping[module])
                 else:
-                    expected_lora_modules.append(module)
+                    expected_oft_modules.append(module)
                 if module == "experts":
-                    expected_lora_modules.append(module)
-            expected_lora_modules = list(set(expected_lora_modules))
-            lora_path = get_adapter_absolute_path(lora_request.lora_path)
+                    expected_oft_modules.append(module)
+            expected_oft_modules = list(set(expected_oft_modules))
+            oft_path = get_adapter_absolute_path(oft_request.oft_path)
 
             peft_helper = PEFTHelper.from_local_dir(
-                lora_path,
+                oft_path,
                 self.max_position_embeddings,
-                lora_request.tensorizer_config_dict,
+                oft_request.tensorizer_config_dict,
             )
 
-            # Validates the LoRA configuration against requirements before
+            # Validates the OFT configuration against requirements before
             # loading weights, throwing an exception if validation fails.
-            peft_helper.validate_legal(self.lora_config)
+            peft_helper.validate_legal(self.oft_config)
 
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
-            # to ensure correct loading of lora weights.
+            # to ensure correct loading of oft weights.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
 
-            lora = self._lora_model_cls.from_local_checkpoint(
-                lora_path,
-                expected_lora_modules,
+            oft = self._oft_model_cls.from_local_checkpoint(
+                oft_path,
+                expected_oft_modules,
                 peft_helper=peft_helper,
-                lora_model_id=lora_request.lora_int_id,
+                oft_model_id=oft_request.oft_int_id,
                 device="cpu",
-                dtype=self.lora_config.lora_dtype,
+                dtype=self.oft_config.oft_dtype,
                 target_embedding_padding=self.vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
-                tensorizer_config_dict=lora_request.tensorizer_config_dict,
+                tensorizer_config_dict=oft_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
             )
 
@@ -132,30 +132,30 @@ class WorkerLoRAManager:
             # FileNotFoundError should be raised if both
             # - No adapter found to download from huggingface (or in
             #       offline mode)
-            # - No local adapter files found at `lora_request.lora_path`
+            # - No local adapter files found at `oft_request.oft_path`
             # For NotFoundError
             raise ValueError(
-                f"Loading lora {lora_request.lora_name} failed: No adapter "
-                f"found for {lora_request.lora_path}"
+                f"Loading oft {oft_request.oft_name} failed: No adapter "
+                f"found for {oft_request.oft_path}"
             ) from e
         except Exception as e:
             # For BadRequestError
             raise e
 
-        return lora
+        return oft
 
-    def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
-        if lora_request.lora_int_id in self.list_adapters():
+    def add_dummy_oft(self, oft_request: OFTRequest, block_size: int) -> bool:
+        if oft_request.oft_int_id in self.list_adapters():
             return False
-        if isinstance(self._cached_dummy_lora, LoRAModel):
-            dummy_lora = self._cached_dummy_lora.clone(lora_request.lora_int_id)
+        if isinstance(self._cached_dummy_oft, OFTModel):
+            dummy_oft = self._cached_dummy_oft.clone(oft_request.oft_int_id)
         else:
-            dummy_lora = self._adapter_manager.create_dummy_lora(
-                lora_request.lora_int_id, rank, self.embedding_modules
+            dummy_oft = self._adapter_manager.create_dummy_oft(
+                oft_request.oft_int_id, block_size, self.embedding_modules
             )
-            if self._cached_dummy_lora is None:
-                self._cached_dummy_lora = dummy_lora
-        return self._adapter_manager.add_adapter(dummy_lora)
+            if self._cached_dummy_oft is None:
+                self._cached_dummy_oft = dummy_oft
+        return self._adapter_manager.add_adapter(dummy_oft)
 
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
@@ -202,71 +202,71 @@ class WorkerLoRAManager:
         return set(self._adapter_manager.list_adapters())
 
 
-class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
-    """WorkerLoRAManager that manages LoRA models on the worker side.
+class LRUCacheWorkerOFTManager(WorkerOFTManager):
+    """WorkerOFTManager that manages OFT models on the worker side.
 
-    Uses an LRU Cache. Every request, the requested LoRAs will be loaded
-    (unless they are already loaded) and least recently used LoRAs will
+    Uses an LRU Cache. Every request, the requested OFTs will be loaded
+    (unless they are already loaded) and least recently used OFTs will
     be unloaded if the cache is above capacity."""
 
-    _manager_cls: type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
+    _manager_cls: type[LRUCacheOFTModelManager] = LRUCacheOFTModelManager
 
-    def create_lora_manager(
+    def create_oft_manager(
         self,
         model: torch.nn.Module,
     ) -> Any:
-        lora_manager = create_lora_manager(
+        oft_manager = create_oft_manager(
             model,
-            lora_manager_cls=self._manager_cls,
+            oft_manager_cls=self._manager_cls,
             max_num_seqs=self.max_num_seqs,
             vocab_size=self.vocab_size,
-            lora_config=self.lora_config,
+            oft_config=self.oft_config,
             device=self.device,
             max_num_batched_tokens=self.max_num_batched_tokens,
         )
-        self._adapter_manager = lora_manager
-        return lora_manager.model
+        self._adapter_manager = oft_manager
+        return oft_manager.model
 
-    def _apply_adapters(self, lora_requests: set[LoRARequest]) -> None:
-        loras_map = {
-            lora_request.lora_int_id: lora_request
-            for lora_request in lora_requests
-            if lora_request
+    def _apply_adapters(self, oft_requests: set[OFTRequest]) -> None:
+        ofts_map = {
+            oft_request.oft_int_id: oft_request
+            for oft_request in oft_requests
+            if oft_request
         }
-        if len(loras_map) > self._adapter_manager.lora_slots:
+        if len(ofts_map) > self._adapter_manager.oft_slots:
             raise RuntimeError(
-                f"Number of requested LoRAs ({len(loras_map)}) is greater "
-                "than the number of GPU LoRA slots "
-                f"({self._adapter_manager.lora_slots})."
+                f"Number of requested OFTs ({len(ofts_map)}) is greater "
+                "than the number of GPU OFT slots "
+                f"({self._adapter_manager.oft_slots})."
             )
-        for lora in loras_map.values():
-            self.add_adapter(lora)
+        for oft in ofts_map.values():
+            self.add_adapter(oft)
 
-    def add_adapter(self, lora_request: LoRARequest) -> bool:
+    def add_adapter(self, oft_request: OFTRequest) -> bool:
         # Note that this method is not thread-safe. It may be invoked multiple
         # times for the same adapter when using multiple API servers.
         # This is ok because it's currently only called from
         # the single-threaded core engine loop.
 
-        if lora_request.lora_int_id not in self.list_adapters():
+        if oft_request.oft_int_id not in self.list_adapters():
             # Load the new adapter first to ensure it is actually valid, before
             # evicting any existing adapters.
-            # This may cause the # of loaded lora adapters to very temporarily
-            # exceed `--max-cpu-loras`.
-            lora = self._load_adapter(lora_request)
+            # This may cause the # of loaded oft adapters to very temporarily
+            # exceed `--max-cpu-ofts`.
+            oft = self._load_adapter(oft_request)
 
             # Loading succeeded, now check if we will exceed cache capacity and
             # evict if the oldest adapter if so
             if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
-                assert isinstance(self._adapter_manager, LRUCacheLoRAModelManager)
+                assert isinstance(self._adapter_manager, LRUCacheOFTModelManager)
                 self._adapter_manager.remove_oldest_adapter()
             # Then add the new adapter to the cache
-            loaded = self._adapter_manager.add_adapter(lora)
+            loaded = self._adapter_manager.add_adapter(oft)
         else:
-            # If the lora is already loaded, just touch it to
+            # If the oft is already loaded, just touch it to
             # update its position in the caches
             loaded = (
-                self._adapter_manager.get_adapter(lora_request.lora_int_id) is not None
+                self._adapter_manager.get_adapter(oft_request.oft_int_id) is not None
             )
-        self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+        self._adapter_manager.activate_adapter(oft_request.oft_int_id)
         return loaded

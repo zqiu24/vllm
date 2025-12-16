@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
 
 from .base import BaseLayerWithOFT
 from .utils import _get_oft_device
+from vllm.oft.oft_ops import apply_oft_linear
 
 
 class BaseLinearLayerWithOFT(BaseLayerWithOFT):
@@ -41,97 +42,109 @@ class BaseLinearLayerWithOFT(BaseLayerWithOFT):
         self.oft_config = oft_config
         #
         if isinstance(self.base_layer, ReplicatedLinear):
-            oft_a_out_size = oft_config.max_oft_rank
-            lora_b_out_size = self.output_size
+            oft_R_size = oft_config.max_oft_block_size * (oft_config.max_oft_block_size - 1) // 2
+            oft_R_block_num = self.input_size // oft_config.max_oft_block_size
 
         elif isinstance(self.base_layer, ColumnParallelLinear):
-            lora_a_out_size = (
-                lora_config.max_lora_rank
-                if not lora_config.fully_sharded_loras
-                else divide(lora_config.max_lora_rank, self.tp_size)
-            )
-            lora_b_out_size = self.output_size
+            oft_R_size = oft_config.max_oft_block_size * (oft_config.max_oft_block_size - 1) // 2
+            oft_R_block_num = self.input_size // oft_config.max_oft_block_size
 
         elif isinstance(self.base_layer, RowParallelLinear):
-            lora_a_out_size = lora_config.max_lora_rank
-            lora_b_out_size = (
-                self.output_size
-                if not lora_config.fully_sharded_loras
-                else divide(self.output_size, self.tp_size)
+            oft_R_size = oft_config.max_oft_block_size * (oft_config.max_oft_block_size - 1) // 2
+            tmp_block_num = self.input_size // oft_config.max_oft_block_size
+            oft_R_block_num = (
+                tmp_block_num
+                if not oft_config.fully_sharded_ofts
+                else divide(tmp_block_num, self.tp_size)
             )
         else:
             raise NotImplementedError
 
-        self.lora_a_stacked = tuple(
+        self.oft_R_stacked = tuple(
             torch.zeros(
-                max_loras,
+                max_ofts,
                 1,
-                lora_a_out_size,
-                self.input_size,
-                dtype=lora_config.lora_dtype,
+                oft_R_block_num,
+                oft_R_size,
+                dtype=oft_config.oft_dtype,
                 device=self.device,
             )
             for _ in range(self.n_slices)
         )
-        self.lora_b_stacked = tuple(
-            torch.zeros(
-                max_loras,
-                1,
-                lora_b_out_size,
-                lora_config.max_lora_rank,
-                dtype=lora_config.lora_dtype,
-                device=self.device,
-            )
-            for _ in range(self.n_slices)
-        )
-        self.output_slices = (self.lora_b_stacked[0].shape[2],)
+        # self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
-    def reset_lora(self, index: int):
+    def reset_oft(self, index: int):
         for s_index in range(self.n_slices):
-            self.lora_a_stacked[s_index][index] = 0
-            self.lora_b_stacked[s_index][index] = 0
+            self.oft_R_stacked[s_index][index] = 0
 
-    def set_lora(
+    def set_oft(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        oft_R: torch.Tensor,
     ):
         # Except for QKVParallelLinearWithOFT and
         # MergedColumnParallelLinearWithOFT, all other linear OFT layers
         # store weights in a tuple of size 1. These two layers will
         # override this function.
-        assert (
-            len(self.lora_a_stacked) == len(self.lora_b_stacked) == self.n_slices == 1
-        )
+        assert len(self.oft_R_stacked) == self.n_slices == 1
 
-        self.reset_lora(index)
+        self.reset_oft(index)
         if self.tp_size > 1:
-            lora_a = self.slice_lora_a(lora_a)
-            lora_b = self.slice_lora_b(lora_b)
+            oft_R = self.slice_oft_R(oft_R)
 
-        self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
-            lora_a, non_blocking=True
-        )
-        self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
-            lora_b, non_blocking=True
+        self.oft_R_stacked[0][index, 0, : oft_R.shape[0], : oft_R.shape[1]].copy_(
+            oft_R, non_blocking=True
         )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+        # Assuming single active adapter at index 0 for now (vLLM usually manages mapping via metadata, 
+        # but for this manual implementation we default to 0).  
 
-        # In Transformers modeling backend, x and output have extra batch dimension like
-        # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
-        # therefore we need to flatten the batch dimensions.
-        if x.ndim == 3 and output.ndim == 3:
-            output = output.flatten(0, 1)
-            x = x.flatten(0, 1)
+        # 1. Apply OFT rotation (Input Side)
+        # If merged QKV layer, this returns a stacked tensor: shape (3 * batch, input_dim)
+        #   [Batch 0: rotated by R_q]
+        #   [Batch 1: rotated by R_k]
+        #   [Batch 2: rotated by R_v]
+        x = apply_oft_linear(x, self.oft_R_stacked, adapter_idx=0)
 
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
-        )
-        if not current_platform.can_update_inplace():
-            output = lora_output
+        # 2. Base Layer Forward Pass (Black Box)
+        # It processes the huge batch. 
+        # Output shape: (3 * batch, output_dim_total) where output_dim_total = Q_dim + K_dim + V_dim
+        # Output shape: (2 * batch, output_dim_total) for gate-up projection layer
+        output_all = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+
+        # 3. Selection & Stitching (The "Deactivation" Step)
+        # If we expanded the batch (merged layer), we must recover the correct outputs.
+        if isinstance(self.oft_R_stacked, (tuple, list)) and len(self.oft_R_stacked) > 1:
+            num_slices = len(self.oft_R_stacked)
+            
+            # A. Split the batch back into 3 separate chunks
+            # Each chunk has shape (batch, output_dim_total)
+            chunks = torch.chunk(output_all, num_slices, dim=0)
+            
+            final_parts = []
+            start_col = 0
+            
+            # self.output_slices stores [Q_dim, K_dim, V_dim]
+            for i, chunk in enumerate(chunks):
+                width = self.output_slices[i]
+                
+                # B. Select the valid columns for this slice
+                # Chunk 0 (Q-input) -> Keep only Q columns [0 : Q_dim]
+                # Chunk 1 (K-input) -> Keep only K columns [Q_dim : Q_dim+K_dim]
+                # ...
+                valid_part = chunk[..., start_col : start_col + width]
+                final_parts.append(valid_part)
+                
+                # Advance the column pointer
+                start_col += width
+            
+            # C. Stitch them together to form the final result
+            # Shape: (batch, Q_dim + K_dim + V_dim)
+            output = torch.cat(final_parts, dim=-1)
+        else:
+            # Standard single layer case
+            output = output_all
 
         return output
 

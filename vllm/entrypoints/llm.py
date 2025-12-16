@@ -436,7 +436,7 @@ class LLM:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
-        # Add any modality specific loras to the corresponding prompts
+        # Add any modality specific loras or ofts to the corresponding prompts
         lora_request = self._get_modality_specific_lora_reqs(prompts, lora_request)
         oft_request = self._get_modality_specific_oft_reqs(prompts, oft_request)
 

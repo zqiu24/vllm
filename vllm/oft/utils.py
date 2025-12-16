@@ -15,26 +15,26 @@ from huggingface_hub.utils import (
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config.lora import LoRAConfig
+from vllm.config.oft import OFTConfig
 from vllm.logger import init_logger
 
-# being imported for _all_lora_classes below
-from vllm.lora.layers import (
-    BaseLayerWithLoRA,
-    ColumnParallelLinearWithLoRA,
-    ColumnParallelLinearWithShardedLoRA,
-    FusedMoEWithLoRA,
-    LogitsProcessorWithLoRA,
-    MergedColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithLoRA,
-    MergedQKVParallelLinearWithShardedLoRA,
-    QKVParallelLinearWithLoRA,
-    QKVParallelLinearWithShardedLoRA,
-    ReplicatedLinearWithLoRA,
-    RowParallelLinearWithLoRA,
-    RowParallelLinearWithShardedLoRA,
-    VocabParallelEmbeddingWithLoRA,
+# being imported for _all_oft_classes below
+from vllm.oft.layers import (
+    BaseLayerWithOFT,
+    ColumnParallelLinearWithOFT,
+    ColumnParallelLinearWithShardedOFT,
+    FusedMoEWithOFT,
+    LogitsProcessorWithOFT,
+    MergedColumnParallelLinearWithOFT,
+    MergedColumnParallelLinearWithShardedOFT,
+    MergedQKVParallelLinearWithOFT,
+    MergedQKVParallelLinearWithShardedOFT,
+    QKVParallelLinearWithOFT,
+    QKVParallelLinearWithShardedOFT,
+    ReplicatedLinearWithOFT,
+    RowParallelLinearWithOFT,
+    RowParallelLinearWithShardedOFT,
+    VocabParallelEmbeddingWithOFT,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
@@ -47,49 +47,49 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_all_lora_classes: set[type[BaseLayerWithLoRA]] = {
-    VocabParallelEmbeddingWithLoRA,
-    ColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithLoRA,
-    QKVParallelLinearWithLoRA,
-    MergedQKVParallelLinearWithLoRA,
-    RowParallelLinearWithLoRA,
-    ReplicatedLinearWithLoRA,
-    LogitsProcessorWithLoRA,
-    ColumnParallelLinearWithShardedLoRA,
-    QKVParallelLinearWithShardedLoRA,
-    MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLoRA,
-    RowParallelLinearWithShardedLoRA,
-    FusedMoEWithLoRA,
+_all_oft_classes: set[type[BaseLayerWithOFT]] = {
+    VocabParallelEmbeddingWithOFT,
+    ColumnParallelLinearWithOFT,
+    MergedColumnParallelLinearWithOFT,
+    QKVParallelLinearWithOFT,
+    MergedQKVParallelLinearWithOFT,
+    RowParallelLinearWithOFT,
+    ReplicatedLinearWithOFT,
+    LogitsProcessorWithOFT,
+    ColumnParallelLinearWithShardedOFT,
+    QKVParallelLinearWithShardedOFT,
+    MergedColumnParallelLinearWithShardedOFT,
+    MergedQKVParallelLinearWithShardedOFT,
+    RowParallelLinearWithShardedOFT,
+    FusedMoEWithOFT,
 }
 
 
 def is_moe_model(model: nn.Module) -> bool:
     """Checks if the model contains FusedMoE layers and warns the user."""
     if any(isinstance(module, FusedMoE) for module in model.modules()):
-        logger.info_once("MoE model detected. Using fused MoE LoRA implementation.")
+        logger.info_once("MoE model detected. Using fused MoE OFT implementation.")
         return True
     return False
 
 
 def from_layer(
     layer: nn.Module,
-    max_loras: int,
-    lora_config: LoRAConfig,
+    max_ofts: int,
+    oft_config: OFTConfig,
     packed_modules_list: list,
     model_config: PretrainedConfig | None = None,
 ) -> nn.Module:
-    for lora_cls in _all_lora_classes:
+    for oft_cls in _all_oft_classes:
         # specifying kwargs so they can be easily accessed in decorator
-        if lora_cls.can_replace_layer(
+        if oft_cls.can_replace_layer(
             source_layer=layer,
-            lora_config=lora_config,
+            oft_config=oft_config,
             packed_modules_list=packed_modules_list,
             model_config=model_config,
         ):
-            instance_layer = lora_cls(layer)
-            instance_layer.create_lora_weights(max_loras, lora_config, model_config)
+            instance_layer = oft_cls(layer)
+            instance_layer.create_oft_weights(max_ofts, oft_config, model_config)
             return instance_layer
     return layer
 
@@ -97,18 +97,18 @@ def from_layer(
 def from_layer_logits_processor(
     layer: "LogitsProcessor",
     lm_head: "ParallelLMHead",
-    max_loras: int,
-    lora_config: LoRAConfig,
+    max_ofts: int,
+    oft_config: OFTConfig,
     model_config: PretrainedConfig | None = None,
-) -> LogitsProcessorWithLoRA:
-    ret = LogitsProcessorWithLoRA(
+) -> LogitsProcessorWithOFT:
+    ret = LogitsProcessorWithOFT(
         layer,
         lm_head.embedding_dim,
         lm_head.weight.dtype,
         lm_head.weight.device,
         lm_head.get_sharded_to_full_mapping(),
     )
-    ret.create_lora_weights(max_loras, lora_config, model_config)
+    ret.create_oft_weights(max_ofts, oft_config, model_config)
     return ret
 
 
@@ -122,23 +122,23 @@ def replace_submodule(
     return new_module
 
 
-def parse_fine_tuned_lora_name(
+def parse_fine_tuned_oft_name(
     name: str, weights_mapper: Optional["WeightsMapper"] = None
 ) -> tuple[str, bool]:
-    """Parse the name of lora weights.
+    """Parse the name of oft weights.
 
     args:
-        name: the name of the fine-tuned LoRA, e.g.
+        name: the name of the fine-tuned OFT, e.g.
             base_model.model.dense1.weight
         weights_mapper: maps the name of weight, e.g.
             `model.` -> `language_model.model.`,
     return:
-        tuple(module_name, is_lora_a):
+        tuple(module_name, is_oft_a):
             module_name: the name of the module, e.g. model.dense1,
-            is_lora_a whether the tensor is lora_a or lora_b.
+            is_oft_a whether the tensor is oft_a or oft_b.
     """
 
-    # LoRA weight qualified name usually starts with `base_model.model.`,
+    # OFT weight qualified name usually starts with `base_model.model.`,
     # so we remove the prefix `base_model.model.` to make the following
     # mapping correctly.
     if name.startswith("base_model.model."):
@@ -155,15 +155,15 @@ def parse_fine_tuned_lora_name(
     start_index = 2 if name.startswith("base_model.model.") else 0
 
     parts = name.split(".")
-    if parts[-1] == "weight" and (parts[-2] == "lora_A" or parts[-2] == "lora_B"):
+    if parts[-1] == "weight" and parts[-2] == "oft_R":
         new_name = ".".join(parts[start_index:-2])
-        return new_name, parts[-2] == "lora_A"
+        return new_name
 
-    if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
+    if parts[-1] == "oft_embedding_R":
         new_name = ".".join(parts[start_index:-1])
-        return new_name, parts[-1] == "lora_embedding_A"
+        return new_name
 
-    raise ValueError(f"{name} is unsupported LoRA weight")
+    raise ValueError(f"{name} is unsupported OFT weight")
 
 
 def is_base_embeddding_weights(name: str) -> bool:
@@ -177,13 +177,13 @@ def is_base_embeddding_weights(name: str) -> bool:
 
 
 def is_regex_target_modules(
-    load_modules: str | list[str], expected_lora_modules: list[str]
+    load_modules: str | list[str], expected_oft_modules: list[str]
 ) -> bool:
     """
     PEFT supports passing `target_modules` in the form of regular expressions,
     such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to
     determine whether the suffix in the regular expression is present in the
-    `expected_lora_modules`.
+    `expected_oft_modules`.
     """
 
     def is_valid_regex(pattern):
@@ -205,66 +205,66 @@ def is_regex_target_modules(
         match = re.search(r"\((.*?)\)\$?$", load_modules)
         if match:
             suffix = match.group(1).split("|")
-            return is_subset(suffix, expected_lora_modules)
+            return is_subset(suffix, expected_oft_modules)
     return False
 
 
-def get_supported_lora_modules(model: nn.Module) -> list[str]:
+def get_supported_oft_modules(model: nn.Module) -> list[str]:
     """
-    In vLLM, all linear layers support LoRA.
+    In vLLM, all linear layers support OFT.
     """
 
-    supported_lora_modules: set[str] = set()
+    supported_oft_modules: set[str] = set()
     for name, module in model.named_modules():
         # get the embedding modules if the module's embedding_modules
         # is not empty.
         embedding_modules = getattr(module, "embedding_modules", None)
         if embedding_modules is not None:
             for name in embedding_modules:
-                supported_lora_modules.add(name)
+                supported_oft_modules.add(name)
 
         # get all the linear subfixes.
         if isinstance(module, (LinearBase,)):
-            supported_lora_modules.add(name.split(".")[-1])
+            supported_oft_modules.add(name.split(".")[-1])
 
         if isinstance(module, (FusedMoE,)):
-            supported_lora_modules.add(name.split(".")[-1])
+            supported_oft_modules.add(name.split(".")[-1])
 
-    return list(supported_lora_modules)
+    return list(supported_oft_modules)
 
 
-def get_adapter_absolute_path(lora_path: str) -> str:
+def get_adapter_absolute_path(oft_path: str) -> str:
     """
-    Resolves the given lora_path to an absolute local path.
+    Resolves the given oft_path to an absolute local path.
 
-    If the lora_path is identified as a Hugging Face model identifier,
+    If the oft_path is identified as a Hugging Face model identifier,
     it will download the model and return the local snapshot path.
-    Otherwise, it treats the lora_path as a local file path and
+    Otherwise, it treats the oft_path as a local file path and
     converts it to an absolute path.
 
     Parameters:
-    lora_path (str): The path to the lora model, which can be an absolute path,
+    oft_path (str): The path to the oft model, which can be an absolute path,
                      a relative path, or a Hugging Face model identifier.
 
     Returns:
-    str: The resolved absolute local path to the lora model.
+    str: The resolved absolute local path to the oft model.
     """
 
     # Check if the path is an absolute path. Return it no matter exists or not.
-    if os.path.isabs(lora_path):
-        return lora_path
+    if os.path.isabs(oft_path):
+        return oft_path
 
     # If the path starts with ~, expand the user home directory.
-    if lora_path.startswith("~"):
-        return os.path.expanduser(lora_path)
+    if oft_path.startswith("~"):
+        return os.path.expanduser(oft_path)
 
     # Check if the expanded relative path exists locally.
-    if os.path.exists(lora_path):
-        return os.path.abspath(lora_path)
+    if os.path.exists(oft_path):
+        return os.path.abspath(oft_path)
 
     # If the path does not exist locally, assume it's a Hugging Face repo.
     try:
-        local_snapshot_path = huggingface_hub.snapshot_download(repo_id=lora_path)
+        local_snapshot_path = huggingface_hub.snapshot_download(repo_id=oft_path)
     except (
         HfHubHTTPError,
         RepositoryNotFoundError,
@@ -274,7 +274,7 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         # Handle errors that may occur during the download
         # Return original path instead of throwing error here
         logger.exception("Error downloading the HuggingFace model")
-        return lora_path
+        return oft_path
 
     return local_snapshot_path
 
@@ -296,7 +296,7 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             return packed_modules_mapping
         else:
             raise AttributeError(
-                "To support LoRA for MoE model, "
+                "To support OFT for MoE model, "
                 "'get_expert_mapping' must be implemented"
             )
     else:

@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config.lora import LoRAConfig
+from vllm.config.oft import OFTConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -15,13 +15,13 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 
-from .base import BaseLayerWithLoRA
+from .base import BaseLayerWithOFT
 
 
-class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
+class LogitsProcessorWithOFT(BaseLayerWithOFT):
     """
-    LoRA wrapper for LogitsProcessor, with extra logic to handle the
-    application of the LoRA adapter and added LoRA vocabulary.
+    OFT wrapper for LogitsProcessor, with extra logic to handle the
+    application of the OFT adapter and added OFT vocabulary.
 
     Args:
         base_layer: LogitsProcessor layer
@@ -82,35 +82,25 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def should_modify_greedy_probs_inplace(self):
         return self.base_layer.should_modify_greedy_probs_inplace
 
-    def create_lora_weights(
+    def create_oft_weights(
         self,
-        max_loras: int,
-        lora_config: LoRAConfig,
+        max_ofts: int,
+        oft_config: OFTConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
         # TODO: Verify if this condition can be further relaxed
         if 32000 < self.base_layer.vocab_size > 257024:
             raise ValueError(
-                "When using LoRA, vocab size must be 32000 >= vocab_size <= 257024"
+                "When using OFT, vocab size must be 32000 >= vocab_size <= 257024"
             )
-        self.lora_a_stacked = torch.zeros(
+        self.oft_R_stacked = torch.zeros(
             (
-                max_loras,
+                max_ofts,
                 1,
-                lora_config.max_lora_rank,
+                oft_config.max_oft_block_size,
                 self.hidden_size,
             ),
-            dtype=lora_config.lora_dtype,
-            device=self.device,
-        )
-        self.lora_b_stacked = torch.zeros(
-            (
-                max_loras,
-                1,
-                self.base_layer.vocab_size,
-                lora_config.max_lora_rank,
-            ),
-            dtype=lora_config.lora_dtype,
+            dtype=oft_config.oft_dtype,
             device=self.device,
         )
 
@@ -121,22 +111,17 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         else:
             self.sharded_to_full_mapping_gpu = None
 
-    def reset_lora(self, index: int):
-        self.lora_a_stacked[index] = 0
-        self.lora_b_stacked[index] = 0
+    def reset_oft(self, index: int):
+        self.oft_R_stacked[index] = 0
 
-    def set_lora(
+    def set_oft(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        oft_R: torch.Tensor,
     ):
-        self.reset_lora(index)
-        self.lora_a_stacked[index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
-            lora_a, non_blocking=True
-        )
-        self.lora_b_stacked[index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
-            lora_b, non_blocking=True
+        self.reset_oft(index)
+        self.oft_R_stacked[index, 0, : oft_R.shape[0], : oft_R.shape[1]].copy_(
+            oft_R, non_blocking=True
         )
 
     def _get_logits(
@@ -175,12 +160,12 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
             logits = logits[:, self.sharded_to_full_mapping_gpu]
 
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_logits(
-            logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked, 1.0
+        oft_output: torch.Tensor | None = self.punica_wrapper.add_oft_logits(
+            logits, hidden_states, self.oft_R_stacked, 1.0
         )
 
         if not current_platform.can_update_inplace():
-            logits = lora_output
+            logits = oft_output
 
         # Remove paddings in vocab (if any).
         logits = logits[:, : self.base_layer.vocab_size]
@@ -193,7 +178,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:

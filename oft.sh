@@ -3,5 +3,6 @@ module load cuda/12.9
 conda activate vllm1
 
 export VLLM_ATTENTION_BACKEND=FLASHINFER
+export VLLM_TORCH_COMPILE_LEVEL=0
 
 python oft.py

@@ -148,7 +148,7 @@ def _get_lora_b_ptr(
 
 
 @functools.lru_cache
-def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
+def load_oft_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
     if user_defined_config_folder is not None:
         gpu_name = torch.cuda.get_device_name()
@@ -180,12 +180,12 @@ def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
 
 
 @functools.lru_cache
-def get_lora_op_configs(
+def get_oft_op_configs(
     op_type: str,
-    max_loras: int,
+    max_ofts: int,
     batch: int,
     hidden_size: int,
-    rank: int,
+    block_size: int,
     num_slices: int,
     add_inputs: bool | None = None,
     moe_intermediate_size: int | None = None,

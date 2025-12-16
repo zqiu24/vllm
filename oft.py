@@ -1,12 +1,38 @@
 from huggingface_hub import snapshot_download
 from vllm import LLM, SamplingParams
 from vllm.oft.request import OFTRequest
-
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
 
 if __name__=='__main__':
 
-    llm = LLM(model="/lustre/fast/fast/zqiu/hf_models/Qwen2.5-3B-Instruct", enable_oft=True)
+    # model_id = "/lustre/fast/fast/zqiu/hf_models/Qwen2.5-3B-Instruct"
+    # adapter_id = "zqiu/Qwen2.5-3B-Instruct-OFT-Test"
 
+    # # 1. Load Base Model
+    # model = AutoModelForCausalLM.from_pretrained(
+    #     model_id,
+    #     device_map="auto",
+    #     torch_dtype="auto",
+    #     trust_remote_code=True
+    # )
+    # tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    # # 2. Load Adapter (OFT) using PeftModel
+    # # Note: Ensure your installed peft version supports OFT (it's a relatively new feature in PEFT)
+    # model = PeftModel.from_pretrained(model, adapter_id)
+
+    # # 3. Verify
+    # for name, param in model.named_parameters():
+    #     print(name, param.shape)
+
+    llm = LLM(
+        model="/lustre/fast/fast/zqiu/hf_models/Qwen2.5-3B-Instruct", 
+        enable_oft=True, 
+        enforce_eager=True,
+        max_oft_block_size=32  # <--- Essential!
+    )
+    
     sql_oft_path = snapshot_download(repo_id="zqiu/Qwen2.5-3B-Instruct-OFT-Test")
 
     sampling_params = SamplingParams(

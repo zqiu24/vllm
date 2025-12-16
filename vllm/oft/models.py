@@ -121,7 +121,7 @@ class OFTModel:
         for tensor_name, tensor in tensors.items():
             if is_base_embeddding_weights(tensor_name):
                 continue
-            module_name, is_oft_a = parse_fine_tuned_oft_name(
+            module_name = parse_fine_tuned_oft_name(
                 tensor_name, weights_mapper
             )
             if module_name not in ofts:
@@ -129,39 +129,34 @@ class OFTModel:
                     module_name, peft_helper
                 )
 
-            if is_lora_a:
-                loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
-                if pin_memory:
-                    loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
-            else:
-                loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
-                assert embedding_padding_modules is not None
-                if (
-                    any(name in module_name for name in embedding_padding_modules)
-                    and target_embedding_padding is not None
-                ):
-                    lora_b = loras[module_name].lora_b
-                    assert target_embedding_padding >= lora_b.shape[0]
-                    addition = target_embedding_padding - lora_b.shape[0]
-                    loras[module_name].lora_b = torch.nn.functional.pad(
-                        lora_b, (0, 0, 0, addition)
-                    )
-                if pin_memory:
-                    loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
+            ofts[module_name].oft_R = tensor.to(device=device, dtype=dtype)
+            assert embedding_padding_modules is not None
+            if (
+                any(name in module_name for name in embedding_padding_modules)
+                and target_embedding_padding is not None
+            ):
+                oft_R = ofts[module_name].oft_R
+                assert target_embedding_padding >= oft_R.shape[0]
+                addition = target_embedding_padding - oft_R.shape[0]
+                ofts[module_name].oft_R = torch.nn.functional.pad(
+                    oft_R, (0, 0, 0, addition)
+                )
+            if pin_memory:
+                ofts[module_name].oft_R = ofts[module_name].oft_R.pin_memory()
 
-        for lora in loras.values():
-            lora.optimize()
+        for oft in ofts.values():
+            oft.optimize()
 
-        return cls(lora_model_id, peft_helper.r, loras)
+        return cls(oft_model_id, peft_helper.oft_block_size, ofts)
 
     @classmethod
     def from_local_checkpoint(
         cls,
-        lora_dir: str,
-        expected_lora_modules: list[str],
+        oft_dir: str,
+        expected_oft_modules: list[str],
         peft_helper: PEFTHelper,
         *,
-        lora_model_id: int | None = None,
+        oft_model_id: int | None = None,
         device: str = "cuda",
         dtype: torch.dtype | None = None,
         target_embedding_padding: int | None = None,
@@ -173,50 +168,50 @@ class OFTModel:
         """Create a OFTModel from a local checkpoint.
 
         Args:
-            lora_dir: The local path that has lora data.
-            expected_lora_modules: Name of modules that are expected to be
-                replaced by lora.
-            peft_helper: Loaded lora configuration information.
-            lora_model_id: OFT model id. If not given, automatically set by
+            oft_dir: The local path that has oft data.
+            expected_oft_modules: Name of modules that are expected to be
+                replaced by oft.
+            peft_helper: Loaded oft configuration information.
+            oft_model_id: OFT model id. If not given, automatically set by
                 a global counter.
-            device: Device where the lora model is loaded.
-            dtype: dtype of the lora model weights.
+            device: Device where the oft model is loaded.
+            dtype: dtype of the oft model weights.
 
         Returns:
             Loaded OFT Model.
         """
-        lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
-        lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
-        lora_pt_file_path = os.path.join(lora_dir, "adapter_model.pt")
+        oft_tensor_path = os.path.join(oft_dir, "adapter_model.safetensors")
+        oft_bin_file_path = os.path.join(oft_dir, "adapter_model.bin")
+        oft_pt_file_path = os.path.join(oft_dir, "adapter_model.pt")
         # new_embeddings_tensor_path = os.path.join(
-        #     lora_dir, "new_embeddings.safetensors"
+        #     oft_dir, "new_embeddings.safetensors"
         # )
-        # new_embeddings_bin_file_path = os.path.join(lora_dir, "new_embeddings.bin")
+        # new_embeddings_bin_file_path = os.path.join(oft_dir, "new_embeddings.bin")
         tensors: dict[str, torch.Tensor] = {}
         unexpected_modules: list[list[str] | str] = []
 
         def check_unexpected_modules(modules: dict):
-            for lora_module in modules.keys():  # noqa
-                if is_base_embeddding_weights(lora_module):
+            for oft_module in modules.keys():  # noqa
+                if is_base_embeddding_weights(oft_module):
                     continue
-                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+                module_name = parse_fine_tuned_oft_name(oft_module, weights_mapper)
                 # Handle FSDP file format where experts.base_layer is the
                 # gate_up_proj and experts is the down_proj
-                if "base_layer" in lora_module:
+                if "base_layer" in oft_module:
                     continue
-                # Case for expert lora weights
+                # Case for expert oft weights
                 if ".experts" in module_name:
                     if not any(
-                        module_name.endswith(ele) for ele in expected_lora_modules
+                        module_name.endswith(ele) for ele in expected_oft_modules
                     ):
                         unexpected_modules.append(module_name)
-                elif module_name.split(".")[-1] not in expected_lora_modules:
+                elif module_name.split(".")[-1] not in expected_oft_modules:
                     unexpected_modules.append(module_name)
 
             if unexpected_modules:
                 raise ValueError(
-                    f"While loading {lora_dir}, expected"
-                    f" target modules in {expected_lora_modules}"
+                    f"While loading {oft_dir}, expected"
+                    f" target modules in {expected_oft_modules}"
                     f" but received {unexpected_modules}."
                     f" Please verify that the loaded OFT module is correct"
                 )
@@ -225,18 +220,18 @@ class OFTModel:
             from tensorizer import TensorDeserializer
 
             tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
-            lora_tensor_path = os.path.join(
+            oft_tensor_path = os.path.join(
                 tensorizer_config.tensorizer_dir, "adapter_model.tensors"
             )
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             tensors = TensorDeserializer(
-                lora_tensor_path,
+                oft_tensor_path,
                 dtype=tensorizer_config.dtype,
                 **tensorizer_args.deserialization_kwargs,
             )
             check_unexpected_modules(tensors)
 
-        elif os.path.isfile(lora_tensor_path):
+        elif os.path.isfile(oft_tensor_path):
             # Find unexpected modules.
             # Use safetensor key as a source of truth to find expected modules.
             # in peft if you have target_modules A, B, C and C does not exist
@@ -244,12 +239,12 @@ class OFTModel:
             # loraified. C won’t exist in the safetensor but it will exist in
             # the target_modules of the adapter_config.json.
             unexpected_modules = []
-            with safetensors.safe_open(lora_tensor_path, framework="pt") as f:  # type: ignore
+            with safetensors.safe_open(oft_tensor_path, framework="pt") as f:  # type: ignore
                 # Load tensors if there are only expected modules.
                 check_unexpected_modules(f)
                 for module in f.keys():  # noqa
                     tensors[module] = f.get_tensor(module)
-        elif os.path.isfile(lora_bin_file_path) or os.path.isfile(lora_pt_file_path):
+        elif os.path.isfile(oft_bin_file_path) or os.path.isfile(oft_pt_file_path):
             # When a bin/pt file is provided, we rely on config to find
             # unexpected modules.
             unexpected_modules = []
@@ -260,32 +255,32 @@ class OFTModel:
                 # Compatible with more modules,
                 # such as:layers.11.self_attn.k_proj
                 part_name = module.split(".")[-1]
-                if part_name not in expected_lora_modules:
+                if part_name not in expected_oft_modules:
                     unexpected_modules.append(module)
-            # loaded lora's target modules must be a subset of
-            # expected_lora_modules. It is not reliable. See
+            # loaded oft's target modules must be a subset of
+            # expected_oft_modules. It is not reliable. See
             # https://github.com/vllm-project/vllm/pull/5909. But there's no
             # other better mechanism.
             if unexpected_modules and not is_regex_target_modules(
-                peft_helper.target_modules, expected_lora_modules
+                peft_helper.target_modules, expected_oft_modules
             ):
                 raise ValueError(
-                    f"While loading {lora_dir}, expected"
-                    f" target modules in {expected_lora_modules}"
+                    f"While loading {oft_dir}, expected"
+                    f" target modules in {expected_oft_modules}"
                     f" but received {unexpected_modules}."
                     f" Please verify that the loaded OFT module is correct"
                 )
-            lora_file_path = (
-                lora_bin_file_path
-                if os.path.isfile(lora_bin_file_path)
-                else lora_pt_file_path
+            oft_file_path = (
+                oft_bin_file_path
+                if os.path.isfile(oft_bin_file_path)
+                else oft_pt_file_path
             )
-            tensors = torch.load(lora_file_path, map_location=device, weights_only=True)
+            tensors = torch.load(oft_file_path, map_location=device, weights_only=True)
         else:
-            raise ValueError(f"{lora_dir} doesn't contain tensors")
+            raise ValueError(f"{oft_dir} doesn't contain tensors")
 
-        return cls.from_lora_tensors(
-            lora_model_id=get_lora_id() if lora_model_id is None else lora_model_id,
+        return cls.from_oft_tensors(
+            oft_model_id=get_oft_id() if oft_model_id is None else oft_model_id,
             tensors=tensors,
             peft_helper=peft_helper,
             device=device,
@@ -306,7 +301,7 @@ class OFTModelManager:
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
-        lora_config: OFTConfig,
+        oft_config: OFTConfig,
         device: torch.device,
     ):
         """Create a OFTModelManager and adapter for a given model.
@@ -318,29 +313,30 @@ class OFTModelManager:
             max_num_batched_tokens: the maximum number of tokens model can run
                 in a single batch.
             vocab_size: the vocab size of the model.
-            lora_config: the OFT configuration.
+            oft_config: the OFT configuration.
         """
         self.model: SupportsOFT = model
         self._registered_adapters: dict[int, OFTModel] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._active_adapters: dict[int, None] = {}
         self.adapter_type = "OFT"
-        self.lora_config = lora_config
+        self.oft_config = oft_config
         self.device = device
         self.max_num_seqs = max_num_seqs
-        assert self.capacity >= self.lora_slots
+        assert self.capacity >= self.oft_slots
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
-        self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
+        self.oft_index_to_id: list[int | None] = [None] * self.oft_slots
         self.vocab_size = vocab_size
-        self.punica_wrapper = get_punica_wrapper(
-            max_num_batched_tokens,
-            max_batches=self.max_num_seqs,
-            device=self.device,
-            max_loras=self.lora_config.max_loras,
-        )
+        # self.punica_wrapper = get_punica_wrapper(
+        #     max_num_batched_tokens,
+        #     max_batches=self.max_num_seqs,
+        #     device=self.device,
+        #     max_ofts=self.oft_config.max_ofts,
+        # )
+        self.punica_wrapper = None
 
-        self.supported_lora_modules = get_supported_lora_modules(self.model)
-        assert self.supported_lora_modules, "No supported OFT modules found in"
+        self.supported_oft_modules = get_supported_oft_modules(self.model)
+        assert self.supported_oft_modules, "No supported OFT modules found in"
         f" {self.model.__class__.__name__}."
 
         self.packed_modules_mapping = process_packed_modules_mapping(self.model)
@@ -356,116 +352,110 @@ class OFTModelManager:
         self.modules: dict[str, BaseLayerWithOFT] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: OFTMapping | None = None
-        self._create_lora_modules()
-        self.model.lora_manager = self
+        self._create_oft_modules()
+        self.model.oft_manager = self
 
     def __len__(self) -> int:
         return len(self._registered_adapters)
 
     @property
     def capacity(self) -> int:
-        return self.lora_config.max_cpu_loras
+        return self.oft_config.max_cpu_ofts
 
     @property
-    def lora_slots(self) -> int:
-        return self.lora_config.max_loras
+    def oft_slots(self) -> int:
+        return self.oft_config.max_ofts
 
     @property
     def adapter_slots(self) -> int:
-        return self.lora_slots
+        return self.oft_slots
 
     def activate_adapter(
         self,
-        lora_id: int,
+        oft_id: int,
     ) -> bool:
         """Move OFT into a GPU buffer to be used in the forward pass."""
-        if lora_id in self._active_adapters:
+        if oft_id in self._active_adapters:
             return False
         first_free_slot = next(
             (
-                (i, lora_id)
-                for i, lora_id in enumerate(self.lora_index_to_id)
-                if lora_id is None
+                (i, oft_id)
+                for i, oft_id in enumerate(self.oft_index_to_id)
+                if oft_id is None
             ),
             None,
         )
         if first_free_slot is None:
-            raise ValueError("No free lora slots")
+            raise ValueError("No free oft slots")
         index, _ = first_free_slot
-        self._active_adapters[lora_id] = None
-        lora_model = self._registered_adapters[lora_id]
+        self._active_adapters[oft_id] = None
+        oft_model = self._registered_adapters[oft_id]
         logger.debug(
-            "Activating OFT. int id: %d, slot index: %d", lora_model.id, index
+            "Activating OFT. int id: %d, slot index: %d", oft_model.id, index
         )
-        self.lora_index_to_id[index] = lora_model.id
+        self.oft_index_to_id[index] = oft_model.id
         for module_name, module in self.modules.items():
-            module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if module_lora:
-                # Note (gnovack) - If MOE lora weights are not split into
+            module_oft = self._get_oft_layer_weights(oft_model, module_name)
+            if module_oft:
+                # Note (gnovack) - If MOE oft weights are not split into
                 # num_experts chunks, we split them here
                 if isinstance(module, FusedMoEWithOFT) and torch.is_tensor(
-                    module_lora.lora_a
+                    module_oft.lora_a
                 ):
+                    breakpoint()
                     # Handle FSDP file format where experts.base_layer is the
                     # gate_up_proj and experts is the down_proj
-                    gate_up_proj_lora = self._get_lora_layer_weights(
-                        lora_model, module_name + ".base_layer"
+                    gate_up_proj_oft = self._get_oft_layer_weights(
+                        oft_model, module_name + ".base_layer"
                     )
 
-                    assert gate_up_proj_lora is not None
-                    assert module_lora is not None
+                    assert gate_up_proj_oft is not None
+                    assert module_oft is not None
 
-                    down_proj_lora = module_lora
-                    num_experts = module_lora.lora_a.shape[0] // module_lora.rank
+                    down_proj_oft = module_oft
+                    num_experts = module_oft.lora_a.shape[0] // module_oft.block_size
 
-                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
-                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=0)
+                    gate_proj_a = gate_up_proj_oft.lora_a.chunk(num_experts, dim=0)
+                    up_proj_a = gate_up_proj_oft.lora_a.chunk(num_experts, dim=0)
 
-                    gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
+                    gate_proj_b = gate_up_proj_oft.lora_b[::2, ...].chunk(
                         num_experts, dim=-1
                     )
-                    up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
+                    up_proj_b = gate_up_proj_oft.lora_b[1::2, ...].chunk(
                         num_experts, dim=-1
                     )
 
-                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=0)
-                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=-1)
+                    down_proj_a = down_proj_oft.lora_a.chunk(num_experts, dim=0)
+                    down_proj_b = down_proj_oft.lora_b.chunk(num_experts, dim=-1)
 
-                    lora_a = []
-                    lora_b = []
+                    oft_R = []
                     for i in range(num_experts):
-                        lora_a.append(gate_proj_a[i])
-                        lora_a.append(down_proj_a[i])
-                        lora_a.append(up_proj_a[i])
+                        oft_R.append(gate_proj_R[i])
+                        oft_R.append(down_proj_R[i])
+                        oft_R.append(up_proj_R[i])
 
-                        lora_b.append(gate_proj_b[i])
-                        lora_b.append(down_proj_b[i])
-                        lora_b.append(up_proj_b[i])
+                    module_oft.oft_R = oft_R
 
-                    module_lora.lora_a = lora_a
-                    module_lora.lora_b = lora_b
-
-                module.set_lora(
+                module.set_oft(
                     index,
-                    module_lora.lora_a,
-                    module_lora.lora_b,
+                    module_oft.oft_R,
                 )
             else:
-                module.reset_lora(index)
+                module.reset_oft(index)
         return True
 
-    def _deactivate_adapter(self, lora_id: int):
+    def _deactivate_adapter(self, oft_id: int):
         try:
-            index = self.lora_index_to_id.index(lora_id)
-            self.lora_index_to_id[index] = None
+            index = self.oft_index_to_id.index(oft_id)
+            self.oft_index_to_id[index] = None
         except ValueError:
             pass
 
-    def _add_adapter(self, lora: OFTModel):
-        self._create_merged_loras_inplace(lora)
-        self._registered_adapters[lora.id] = lora
+    def _add_adapter(self, oft: OFTModel):
+        self._create_merged_ofts_inplace(oft)
+        self._registered_adapters[oft.id] = oft
 
-    def pin_adapter(self, lora_id: int) -> bool:
+    def pin_adapter(self, oft_id: int) -> bool:
         """Pin a OFTModel in the manager cache."""
         raise NotImplementedError(
             "Pinning is not supported in OFTModelManager. "
@@ -473,21 +463,22 @@ class OFTModelManager:
         )  # type: ignore
 
     def _set_adapter_mapping(self, mapping: OFTMapping) -> None:
-        # update lora states
-        self.punica_wrapper.update_metadata(
-            mapping,
-            self.lora_index_to_id,
-            self.lora_slots + 1,
-            self.vocab_size,
-        )
+        # update oft states
+        # self.punica_wrapper.update_metadata(
+        #     mapping,
+        #     self.oft_index_to_id,
+        #     self.oft_slots + 1,
+        #     self.vocab_size,
+        # )
+        pass
 
     def remove_all_adapters(self):
         """Remove all OFTModels from the manager."""
         self._registered_adapters.clear()
-        self.lora_index_to_id = [None] * self.lora_slots
+        self.oft_index_to_id = [None] * self.oft_slots
         self._active_adapters.clear()
 
-    def _create_lora_modules(self):
+    def _create_oft_modules(self):
         def _parent_module(module_name: str) -> str:
             # module name is a dot separated name.
             # for example:
@@ -517,8 +508,8 @@ class OFTModelManager:
                 module_name,
                 from_layer(
                     module,
-                    self.lora_slots,
-                    self.lora_config,
+                    self.oft_slots,
+                    self.oft_config,
                     packed_moduled_lst,
                     self.model.config,
                 ),
@@ -543,8 +534,8 @@ class OFTModelManager:
                     from_layer_logits_processor(
                         logits_processor_module,
                         module,
-                        self.lora_slots,
-                        self.lora_config,
+                        self.oft_slots,
+                        self.oft_config,
                         self.model.config,
                     ),
                 )
@@ -558,8 +549,8 @@ class OFTModelManager:
                 continue
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
-            # All lora layers share the same punica_wrapper based on reference.
-            new_module.set_mapping(self.punica_wrapper)
+            # All oft layers share the same punica_wrapper based on reference.
+            # new_module.set_mapping(self.punica_wrapper)
 
     def register_module(self, module_name: str, module: "BaseLayerWithOFT"):
         assert isinstance(module, BaseLayerWithOFT), (
@@ -568,14 +559,14 @@ class OFTModelManager:
         f" got {type(module)}"
         self.modules[module_name] = module
 
-    def create_dummy_lora(
+    def create_dummy_oft(
         self,
-        lora_id: int,
-        rank: int,
+        oft_id: int,
+        block_size: int,
         embedding_modules: dict[str, str] | None = None,
     ) -> OFTModel:
         """Create zero-initialized OFTModel for warmup."""
-        model = OFTModel(lora_id, rank, {})
+        model = OFTModel(oft_id, block_size, {})
         for module_name, module in self.model.named_modules():
             if (
                 not self._match_target_modules(module_name)
@@ -592,44 +583,46 @@ class OFTModelManager:
                         if hasattr(module.base_layer, "org_vocab_size")
                         else module.base_layer.weight.shape[1]
                     )
-                    output_dim = (
-                        module.base_layer.embedding_dim
-                        if hasattr(module.base_layer, "embedding_dim")
-                        else module.base_layer.weight.shape[0]
-                    )
-                    lora = OFTLayerWeights.create_dummy_lora_weights(
+                    # output_dim = (
+                    #     module.base_layer.embedding_dim
+                    #     if hasattr(module.base_layer, "embedding_dim")
+                    #     else module.base_layer.weight.shape[0]
+                    # )
+                    oft_R_size = block_size * (block_size - 1) // 2
+                    oft_R_block_num = input_dim // block_size
+                    oft = OFTLayerWeights.create_dummy_oft_weights(
                         module_name,
-                        input_dim,
-                        output_dim,
-                        rank,
-                        module.lora_a_stacked[0].dtype,
+                        oft_R_size,
+                        oft_R_block_num,
+                        block_size,
+                        module.oft_R_stacked[0].dtype,
                         "cpu",
                     )
                 else:
-                    lora = OFTLayerWeights.create_dummy_lora_weights(
+                    oft = OFTLayerWeights.create_dummy_oft_weights(
                         module_name,
-                        module.lora_a_stacked[0].shape[-1],
-                        module.lora_b_stacked[0].shape[-2],
-                        rank,
-                        module.lora_a_stacked[0].dtype,
+                        module.oft_R_stacked[0].shape[-1],
+                        module.oft_R_stacked[0].shape[-2],
+                        block_size,
+                        module.oft_R_stacked[0].dtype,
                         "cpu",
                     )
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
-                subloras: list[OFTLayerWeights | None] = []
+                subofts: list[OFTLayerWeights | None] = []
                 for i, r in enumerate(replacements):
-                    lora = OFTLayerWeights.create_dummy_lora_weights(
+                    oft = OFTLayerWeights.create_dummy_oft_weights(
                         module_name + "." + r,
-                        module.lora_a_stacked[i].shape[-1],
-                        module.lora_b_stacked[i].shape[-2],
-                        rank,
-                        module.lora_a_stacked[i].dtype,
+                        module.oft_R_stacked[i].shape[-1],
+                        module.oft_R_stacked[i].shape[-2],
+                        block_size,
+                        module.oft_R_stacked[i].dtype,
                         "cpu",
                     )
-                    subloras.append(lora)
-                lora = PackedOFTLayerWeights.pack(subloras)
-            model.loras[module_name] = lora
+                    subofts.append(oft)
+                oft = PackedOFTLayerWeights.pack(subofts)
+            model.ofts[module_name] = oft
         return model
 
     def _match_target_modules(self, module_name: str):
@@ -638,7 +631,7 @@ class OFTModelManager:
                 r".*\.{target_module}$".format(target_module=target_module), module_name
             )
             or target_module == module_name
-            for target_module in self.supported_lora_modules
+            for target_module in self.supported_oft_modules
         )
 
     def _filter_unsupported_mm_module(self, module_name: str) -> bool:
@@ -666,50 +659,50 @@ class OFTModelManager:
             prefix + "." + r if prefix else r for r in replacements
         ]
 
-    def _create_merged_loras_inplace(self, lora_model: OFTModel) -> None:
+    def _create_merged_ofts_inplace(self, oft_model: OFTModel) -> None:
         for module_name, new_module_names in self.packed_modules.items():
-            replacement_loras: list[OFTLayerWeights | None] = []
+            replacement_ofts: list[OFTLayerWeights | None] = []
             replaced_module: set[str] = set()
             has_replacement = False
             for r in new_module_names:
-                lora = self._get_lora_layer_weights(lora_model, r)
-                replacement_loras.append(lora)
-                if lora:
+                oft = self._get_oft_layer_weights(oft_model, r)
+                replacement_ofts.append(oft)
+                if oft:
                     has_replacement = True
                     replaced_module.add(r)
             if not has_replacement:
                 continue
-            for i in range(len(replacement_loras)):
-                if replacement_loras[i]:
+            for i in range(len(replacement_ofts)):
+                if replacement_ofts[i]:
                     continue
-                replacement_loras[i] = None
+                replacement_ofts[i] = None
             # HACK Temporary solution for the pool model.
-            if self.is_pooling_model and not lora_model.check_lora_name(module_name):
+            if self.is_pooling_model and not oft_model.check_oft_name(module_name):
                 replaced_module_name = module_name.replace("model.", "")
-                if lora_model.check_lora_name(module_name):
+                if oft_model.check_oft_name(module_name):
                     module_name = replaced_module_name
-            lora_model.loras[module_name] = PackedOFTLayerWeights.pack(
-                replacement_loras
+            oft_model.ofts[module_name] = PackedOFTLayerWeights.pack(
+                replacement_ofts
             )
             # Remove the modules that have been replaced.
             for module in replaced_module:
-                lora_model.loras.pop(module, None)
+                oft_model.ofts.pop(module, None)
 
-    def _get_lora_layer_weights(
-        self, lora_model: OFTModel, module_name: str
+    def _get_oft_layer_weights(
+        self, oft_model: OFTModel, module_name: str
     ) -> OFTLayerWeights | None:
         org_module_name = module_name
-        if self.is_pooling_model and not lora_model.check_lora_name(module_name):
+        if self.is_pooling_model and not oft_model.check_oft_name(module_name):
             # If it's a pool model, and the layer name is not found,
             # remove the prefix 'model.' and search again.
             module_name = module_name.replace("model.", "")
-            if lora_model.check_lora_name(module_name):
+            if oft_model.check_oft_name(module_name):
                 org_module_name = module_name
                 logger.info_once(
                     "For the pool model, successfully loaded the OFT weights "
                     "after removing the prefix 'model.'."
                 )
-        return lora_model.get_lora(org_module_name)
+        return oft_model.get_oft(org_module_name)
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         if adapter_id not in self._active_adapters:
@@ -747,8 +740,8 @@ class OFTModelManager:
 
 
 class OFTLRUCache(AdapterLRUCache[OFTModel]):
-    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], bool]):
-        super().__init__(capacity, deactivate_lora_fn)
+    def __init__(self, capacity: int, deactivate_oft_fn: Callable[[int], bool]):
+        super().__init__(capacity, deactivate_oft_fn)
 
 
 class LRUCacheOFTModelManager(OFTModelManager):
@@ -760,47 +753,47 @@ class LRUCacheOFTModelManager(OFTModelManager):
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
-        lora_config: OFTConfig,
+        oft_config: OFTConfig,
         device: torch.device,
     ):
         super().__init__(
-            model, max_num_seqs, max_num_batched_tokens, vocab_size, lora_config, device
+            model, max_num_seqs, max_num_batched_tokens, vocab_size, oft_config, device
         )
         self._registered_adapters: OFTLRUCache = OFTLRUCache(
             self.capacity, self.deactivate_adapter
         )
         self._active_adapters: OFTLRUCache = OFTLRUCache(
-            self.lora_slots, self._deactivate_adapter
+            self.oft_slots, self._deactivate_adapter
         )
 
     def list_adapters(self) -> dict[int, OFTModel]:
         """List all registered OFTModels."""
         return dict(self._registered_adapters.cache)
 
-    def add_adapter(self, lora: OFTModel) -> bool:
+    def add_adapter(self, oft: OFTModel) -> bool:
         """Add a OFTModel to the manager."""
-        logger.debug("Adding lora. Model id: %d, int id: %d", lora.id, lora.id)
-        if lora.id not in self._registered_adapters:
-            self._add_adapter(lora)
+        logger.debug("Adding oft. Model id: %d, int id: %d", oft.id, oft.id)
+        if oft.id not in self._registered_adapters:
+            self._add_adapter(oft)
             was_added = True
         else:
             # We always touch to update the LRU cache order
-            self._registered_adapters.touch(lora.id)
+            self._registered_adapters.touch(oft.id)
             was_added = False
         return was_added
 
     def activate_adapter(
         self,
-        lora_id: int,
+        oft_id: int,
     ) -> bool:
         if (
-            lora_id not in self._active_adapters
-            and len(self._active_adapters) >= self.lora_slots
+            oft_id not in self._active_adapters
+            and len(self._active_adapters) >= self.oft_slots
         ):
             self._active_adapters.remove_oldest()
-        result = super().activate_adapter(lora_id)
+        result = super().activate_adapter(oft_id)
         # We always touch to update the LRU cache order
-        self._active_adapters.touch(lora_id)
+        self._active_adapters.touch(oft_id)
         return result
 
     def remove_oldest_adapter(self) -> bool:
@@ -809,48 +802,48 @@ class LRUCacheOFTModelManager(OFTModelManager):
             return True
         return False
 
-    def pin_adapter(self, lora_id: int) -> bool:
+    def pin_adapter(self, oft_id: int) -> bool:
         """Pin a OFTModel in the manager cache."""
-        self._pin_lora_in_cpu_cache(lora_id)
-        self._pin_lora_in_gpu_cache(lora_id)
+        self._pin_oft_in_cpu_cache(oft_id)
+        self._pin_oft_in_gpu_cache(oft_id)
         return True
 
-    def _pin_lora_in_cpu_cache(self, lora_id: int):
+    def _pin_oft_in_cpu_cache(self, oft_id: int):
         try:
-            self._registered_adapters.pin(lora_id)
+            self._registered_adapters.pin(oft_id)
         except ValueError as err:
             raise ValueError(
-                f"Pinning failed. OFT {lora_id} is not registered."
+                f"Pinning failed. OFT {oft_id} is not registered."
             ) from err
 
-    def _pin_lora_in_gpu_cache(self, lora_id: int):
-        if lora_id not in self._active_adapters:
-            # move lora to gpu if not already active
-            self.activate_adapter(lora_id)
+    def _pin_oft_in_gpu_cache(self, oft_id: int):
+        if oft_id not in self._active_adapters:
+            # move oft to gpu if not already active
+            self.activate_adapter(oft_id)
 
-        self._active_adapters.pin(lora_id)
+        self._active_adapters.pin(oft_id)
 
 
-def create_lora_manager(
+def create_oft_manager(
     model: nn.Module,
     max_num_seqs: int,
     max_num_batched_tokens: int,
     vocab_size: int,
-    lora_config: OFTConfig,
+    oft_config: OFTConfig,
     device: torch.device,
-    lora_manager_cls: type[OFTModelManager] = OFTModelManager,
+    oft_manager_cls: type[OFTModelManager] = OFTModelManager,
     **kwargs,
 ) -> OFTModelManager:
     """Create a OFT adapter for a given model."""
     if not isinstance(model, SupportsOFT):
         raise ValueError(f"Model {type(model)} is not supported for OFT.")
-    lora_manager = lora_manager_cls(
+    oft_manager = oft_manager_cls(
         model=model,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         vocab_size=vocab_size,
-        lora_config=lora_config,
+        oft_config=oft_config,
         device=device,
         **kwargs,
     )
-    return lora_manager
+    return oft_manager

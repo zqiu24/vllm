@@ -31,6 +31,8 @@ def main():
         torch_dtype=torch.bfloat16  # Use float16 if your GPU doesn't support bf16
     )
 
+    breakpoint()
+
     # 2. Configure LoRA (PEFT)
     peft_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM, 

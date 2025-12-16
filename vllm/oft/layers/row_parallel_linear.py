@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config.lora import LoRAConfig
+from vllm.config.oft import OFTConfig
 from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_reduce,
@@ -14,18 +14,18 @@ from vllm.distributed import (
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.platforms import current_platform
 
-from .base_linear import BaseLinearLayerWithLoRA
+from .base_linear import BaseLinearLayerWithOFT
 from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
 
-class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
+class RowParallelLinearWithOFT(BaseLinearLayerWithOFT):
     def __init__(self, base_layer: RowParallelLinear) -> None:
         super().__init__(base_layer)
 
         # reset input_size
         self.input_size = self.base_layer.input_size_per_partition
         self.output_size = self.base_layer.output_size
-        # There is only one LoRA layer.
+        # There is only one OFT layer.
         self.n_slices = 1
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
@@ -85,7 +85,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
@@ -93,18 +93,18 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
 
 # The following layer is based on the tensor parallelism strategy given in
-# Y. Sheng et al., S-LoRA: Serving Thousands of Concurrent LoRA Adapters. 2023,
+# Y. Sheng et al., S-OFT: Serving Thousands of Concurrent OFT Adapters. 2023,
 # https://arxiv.org/abs/2311.03285.
 
 
-class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
+class RowParallelLinearWithShardedOFT(RowParallelLinearWithOFT):
     """
-    Differs from RowParallelLinearWithLoRA by slicing the
-    LoRA B's also.
+    Differs from RowParallelLinearWithOFT by slicing the
+    OFT B's also.
 
-    Based on S-LoRA, slicing happens along the output dim.
+    Based on S-OFT, slicing happens along the output dim.
     This yields a combined partial sum from the row parallel base
-    layer and column partitioned output from the LoRA.
+    layer and column partitioned output from the OFT.
     """
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
@@ -133,7 +133,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         if self.tp_size > 1:
             buffer = tensor_model_parallel_all_reduce(buffer)
 
-        # following S-LoRA, allows the fusing of all_gather and all_reduce
+        # following S-OFT, allows the fusing of all_gather and all_reduce
         # by adding the column partitioned lora output to a slice of output
         # tensor, which is a partial sum due to row parallel. All that
         # remains is a standard all_reduce. User should be aware though that
@@ -162,14 +162,14 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
             source_layer=source_layer,
-            lora_config=lora_config,
+            oft_config=oft_config,
             packed_modules_list=packed_modules_list,
             model_config=model_config,
             decorate=False,

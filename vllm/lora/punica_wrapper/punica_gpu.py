@@ -226,6 +226,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
         )
 
+        print('lora a stacked', lora_a_stacked)
+        print('lora b stacked', lora_b_stacked)
+        exit()
+
         self.add_shrink(
             buffer,  # type: ignore
             x,

@@ -7,14 +7,14 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm import envs
-from vllm.config.lora import LoRAConfig
+from vllm.config.oft import OFTConfig
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.utils import divide
-from vllm.lora.layers.base import BaseLayerWithLoRA
-from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
+from vllm.oft.layers.base import BaseLayerWithOFT
+from vllm.oft.ops.triton_ops.utils import get_oft_op_configs
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
@@ -31,13 +31,13 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 )
 
 
-class FusedMoEWithLoRA(BaseLayerWithLoRA):
+class FusedMoEWithOFT(BaseLayerWithOFT):
     def __init__(self, base_layer: FusedMoE) -> None:
         super().__init__()
         self.base_layer = base_layer
 
         assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
+            "EP support for Fused MoE OFT is not implemented yet."
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -297,11 +297,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def create_lora_weights(
         self,
         max_loras: int,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
-        self.fully_sharded = lora_config.fully_sharded_loras
+        self.fully_sharded = oft_config.fully_sharded_loras
 
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
@@ -311,12 +311,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             (
                 max_loras,
                 self.base_layer.local_num_experts,
-                lora_config.max_lora_rank
+                oft_config.max_lora_rank
                 if not self.fully_sharded
-                else divide(lora_config.max_lora_rank, self.tp_size),
+                else divide(oft_config.max_lora_rank, self.tp_size),
                 self.base_layer.hidden_size,
             ),
-            dtype=lora_config.lora_dtype,
+            dtype=oft_config.lora_dtype,
             device=self.device,
         )
         self.w1_lora_b_stacked = torch.zeros(
@@ -324,9 +324,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 max_loras,
                 self.base_layer.local_num_experts,
                 self.base_layer.intermediate_size_per_partition,
-                lora_config.max_lora_rank,
+                oft_config.max_lora_rank,
             ),
-            dtype=lora_config.lora_dtype,
+            dtype=oft_config.lora_dtype,
             device=self.device,
         )
 
@@ -334,10 +334,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             (
                 max_loras,
                 self.base_layer.local_num_experts,
-                lora_config.max_lora_rank,
+                oft_config.max_lora_rank,
                 self.base_layer.intermediate_size_per_partition,
             ),
-            dtype=lora_config.lora_dtype,
+            dtype=oft_config.lora_dtype,
             device=self.device,
         )
         self.w2_lora_b_stacked = torch.zeros(
@@ -347,9 +347,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.base_layer.hidden_size
                 if not self.fully_sharded
                 else divide(self.base_layer.hidden_size, self.tp_size),
-                lora_config.max_lora_rank,
+                oft_config.max_lora_rank,
             ),
-            dtype=lora_config.lora_dtype,
+            dtype=oft_config.lora_dtype,
             device=self.device,
         )
 
@@ -357,12 +357,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             (
                 max_loras,
                 self.base_layer.local_num_experts,
-                lora_config.max_lora_rank
+                oft_config.max_lora_rank
                 if not self.fully_sharded
-                else divide(lora_config.max_lora_rank, self.tp_size),
+                else divide(oft_config.max_lora_rank, self.tp_size),
                 self.base_layer.hidden_size,
             ),
-            dtype=lora_config.lora_dtype,
+            dtype=oft_config.lora_dtype,
             device=self.device,
         )
         self.w3_lora_b_stacked = torch.zeros(
@@ -370,14 +370,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 max_loras,
                 self.base_layer.local_num_experts,
                 self.base_layer.intermediate_size_per_partition,
-                lora_config.max_lora_rank,
+                oft_config.max_lora_rank,
             ),
-            dtype=lora_config.lora_dtype,
+            dtype=oft_config.lora_dtype,
             device=self.device,
         )
 
-        # They will be used by 'LoRALayerWeights.create_dummy_lora_weights'
-        # to create a dummy LoRA weights.
+        # They will be used by 'OFTLayerWeights.create_dummy_lora_weights'
+        # to create a dummy OFT weights.
         self.lora_a_stacked = []
         self.lora_b_stacked = []
         for lora_id in range(max_loras):
@@ -391,7 +391,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.lora_b_stacked.append(self.w2_lora_b_stacked[lora_id][experts_id])
                 self.lora_b_stacked.append(self.w3_lora_b_stacked[lora_id][experts_id])
 
-    def reset_lora(self, index: int):
+    def reset_oft(self, index: int):
         """Resets the lora weights at index back to 0."""
         self.w1_lora_a_stacked[index] = 0
         self.w1_lora_b_stacked[index] = 0
@@ -401,14 +401,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.w2_lora_b_stacked[index] = 0
         self.adapter_enabled[index] = 0
 
-    def set_lora(
+    def set_oft(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        oft_R: torch.Tensor,
     ):
         """Overwrites lora tensors at index."""
-        self.reset_lora(index)
+        self.reset_oft(index)
         self.adapter_enabled[index] = 1
         for eid in range(len(lora_a) // 3):
             w1_lora_a = lora_a[eid * 3]
@@ -418,7 +417,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             w2_lora_b = lora_b[eid * 3 + 1]
             w3_lora_b = lora_b[eid * 3 + 2]
 
-            # Handle the case of adding LoRA to only a subset of experts
+            # Handle the case of adding OFT to only a subset of experts
             if w1_lora_a is None or w2_lora_a is None or w3_lora_a is None:
                 continue
 
@@ -432,7 +431,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 w2_lora_a = w2_lora_a[:, start_idx:end_idx]
 
                 if self.fully_sharded:
-                    # Based on S-LoRA, we slice W1 and W3 A along the rank dim,
+                    # Based on S-OFT, we slice W1 and W3 A along the rank dim,
                     # and W2 B along the hidden_size dim.
                     w13_shard_size = self.w1_lora_a_stacked[index, eid].shape[0]
                     w13_start_idx = self.tp_rank * w13_shard_size
@@ -471,11 +470,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
-        """Returns True if the layer can be replaced by this LoRA layer."""
+        """Returns True if the layer can be replaced by this OFT layer."""
         # return type(source_layer) is FusedMoE
         return isinstance(source_layer, FusedMoE)
 

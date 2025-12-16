@@ -7,45 +7,38 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config.lora import LoRAConfig
+from vllm.config.oft import OFTConfig
 
 if TYPE_CHECKING:
-    from vllm.lora.punica_wrapper import PunicaWrapperBase
+    from vllm.oft.punica_wrapper import PunicaWrapperBase
 
 
-class BaseLayerWithLoRA(nn.Module):
-    def slice_lora_a(
-        self, lora_a: torch.Tensor | list[torch.Tensor | None]
+class BaseLayerWithOFT(nn.Module):
+    def slice_oft_R(
+        self, oft_R: torch.Tensor | list[torch.Tensor | None]
     ) -> torch.Tensor | list[torch.Tensor | None]:
-        """Slice lora a if splitting for tensor parallelism."""
+        """Slice oft R if splitting for tensor parallelism."""
         ...
 
-    def slice_lora_b(
-        self, lora_b: torch.Tensor | list[torch.Tensor | None]
-    ) -> torch.Tensor | list[torch.Tensor | None]:
-        """Slice lora b if splitting with tensor parallelism."""
-        ...
-
-    def create_lora_weights(
+    def create_oft_weights(
         self,
-        max_loras: int,
-        lora_config: LoRAConfig,
+        max_ofts: int,
+        oft_config: OFTConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
-        """Initializes lora matrices."""
+        """Initializes oft matrices."""
         ...
 
-    def reset_lora(self, index: int):
-        """Resets the lora weights at index back to 0."""
+    def reset_oft(self, index: int):
+        """Resets the oft weights at index back to 0."""
         ...
 
-    def set_lora(
+    def set_oft(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        oft_R: torch.Tensor,
     ):
-        """Overwrites lora tensors at index."""
+        """Overwrites oft tensors at index."""
         ...
 
     def set_mapping(
@@ -58,9 +51,9 @@ class BaseLayerWithLoRA(nn.Module):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
-        """Returns True if the layer can be replaced by this LoRA layer."""
+        """Returns True if the layer can be replaced by this OFT layer."""
         raise NotImplementedError

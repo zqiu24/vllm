@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config.lora import LoRAConfig
+from vllm.config.oft import OFTConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.utils import divide
 from vllm.model_executor.layers.linear import (
@@ -16,14 +16,14 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.platforms import current_platform
 
-from .base_linear import BaseLinearLayerWithLoRA
+from .base_linear import BaseLinearLayerWithOFT
 from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
 
-def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
+def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithOFT"):
     """
-    For `ColumnParallelLinearWithLoRA` or classes that inherit from
-    `ColumnParallelLinearWithLoRA`, they share the same `apply` logic.
+    For `ColumnParallelLinearWithOFT` or classes that inherit from
+    `ColumnParallelLinearWithOFT`, they share the same `apply` logic.
     """
     assert (
         layer.n_slices
@@ -71,10 +71,10 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     return output
 
 
-class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
+class ColumnParallelLinearWithOFT(BaseLinearLayerWithOFT):
     """
-    LoRA on top of ColumnParallelLinear layer.
-    LoRA B is sliced for tensor parallelism.
+    OFT on top of ColumnParallelLinear layer.
+    OFT B is sliced for tensor parallelism.
     There are two types for the `base_layer`:
     1. ColumnParallelLinear, e.g.`dense_h_to_4h` in `FalconForCausalLM`.
     2. MergedColumnParallelLinear, e.g.`gate_up_proj` in `Phi3ForCausalLM`.
@@ -87,7 +87,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         # inconsistent when TP is greater than 1.
         self.is_merged_col_linear = type(base_layer) is MergedColumnParallelLinear
         self.output_size = self.base_layer.output_size_per_partition
-        # There is only one LoRA layer
+        # There is only one OFT layer
         self.n_slices = 1
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
@@ -151,7 +151,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
@@ -161,11 +161,11 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         )
 
 
-class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
+class MergedColumnParallelLinearWithOFT(ColumnParallelLinearWithOFT):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
     packed together (e.g. gate_proj + up_proj -> gate_up_proj).
 
-    This means we have 2 LoRAs, each applied to one half of the layer.
+    This means we have 2 OFTs, each applied to one half of the layer.
 
     Both slices must have the same size.
     """
@@ -174,7 +174,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self, base_layer: MergedColumnParallelLinear | QKVParallelLinear
     ) -> None:
         super().__init__(base_layer)
-        # There are two LoRA layers
+        # There are two OFT layers
         # the output_sizes in MergedColumnParallelLinear is not sharded by tp
         # we need to divide it by the tp_size to get correct slices size
         output_sizes = self.base_layer.output_sizes
@@ -187,19 +187,19 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def create_lora_weights(
         self,
         max_loras: int,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """
         The main reason for overriding this function is to enhance  code
         maintainability.
         """
-        self.lora_config = lora_config
+        self.oft_config = oft_config
 
         lora_a_output_size_per_partition = (
-            lora_config.max_lora_rank
-            if not lora_config.fully_sharded_loras
-            else divide(lora_config.max_lora_rank, self.tp_size)
+            oft_config.max_lora_rank
+            if not oft_config.fully_sharded_loras
+            else divide(oft_config.max_lora_rank, self.tp_size)
         )
 
         self.lora_a_stacked = tuple(
@@ -208,7 +208,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 1,
                 lora_a_output_size_per_partition,
                 self.input_size,
-                dtype=lora_config.lora_dtype,
+                dtype=oft_config.lora_dtype,
                 device=self.device,
             )
             for _ in range(self.n_slices)
@@ -218,8 +218,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 max_loras,
                 1,
                 output_size,
-                lora_config.max_lora_rank,
-                dtype=lora_config.lora_dtype,
+                oft_config.max_lora_rank,
+                dtype=oft_config.lora_dtype,
                 device=self.device,
             )
             for output_size in self.output_slices
@@ -243,34 +243,28 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 ]
         return sliced_lora_b
 
-    def set_lora(
+    def set_oft(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        oft_R: torch.Tensor,
     ):
-        self.reset_lora(index)
+        self.reset_oft(index)
 
         if self.tp_size > 1:
-            lora_a = self.slice_lora_a(lora_a)
-            lora_b = self.slice_lora_b(lora_b)
+            oft_R = self.slice_oft_R(oft_R)
 
         for i in range(self.n_slices):
-            if (lora_a_i := lora_a[i]) is not None:
-                self.lora_a_stacked[i][
-                    index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
-                ].copy_(lora_a_i, non_blocking=True)
-            if (lora_b_i := lora_b[i]) is not None:
-                self.lora_b_stacked[i][
-                    index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
-                ].copy_(lora_b_i, non_blocking=True)
+            if (oft_R_i := oft_R[i]) is not None:
+                self.oft_R_stacked[i][
+                    index, 0, : oft_R_i.shape[0], : oft_R_i.shape[1]
+                ].copy_(oft_R_i, non_blocking=True)
 
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
@@ -280,11 +274,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         )
 
 
-class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
+class QKVParallelLinearWithOFT(ColumnParallelLinearWithOFT):
     """
     ColumnParallelLinear layer that is specifically designed for
     qkv_proj. Certain models, such as chatglm3 and baichuan-7b,
-    only contains a single LoRA within their qkv_proj layer.
+    only contains a single OFT within their qkv_proj layer.
 
     During inference with Tensor Parallel, the weights of lora_b
     must be accurately partitioned according to the respective ranks.
@@ -305,7 +299,7 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.kv_proj_total_size = (
             self.base_layer.total_num_kv_heads * self.base_layer.head_size
         )
-        # There is only one LoRA layer
+        # There is only one OFT layer
         self.n_slices = 1
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
@@ -336,19 +330,19 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
         return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 1
 
 
-class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
+class MergedQKVParallelLinearWithOFT(MergedColumnParallelLinearWithOFT):
     """MergedColumnParallelLinear layer that is composed of 3 sublayers (slices)
     packed together in qkv proj fashion
     (q_proj + k_proj + v_proj -> qkv_proj).
 
-    This means we have 3 LoRAs, each applied to one slice of the layer.
+    This means we have 3 OFTs, each applied to one slice of the layer.
 
     Q slice may have different shape than K and V slices (which both have
     the same shape).
@@ -356,7 +350,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
 
     def __init__(self, base_layer: QKVParallelLinear) -> None:
         super().__init__(base_layer)
-        # There are three LoRA layer.
+        # There are three OFT layer.
         self.n_slices = len(self.base_layer.output_sizes)
 
         self.q_proj_shard_size = self.base_layer.num_heads * self.base_layer.head_size
@@ -380,21 +374,21 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
     def create_lora_weights(
         self,
         max_loras: int,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """
         The main reason for overloading this function is to handle inconsistent
         weight dimensions in qkv lora.
         """
-        super().create_lora_weights(max_loras, lora_config, model_config)
+        super().create_lora_weights(max_loras, oft_config, model_config)
 
     @classmethod
     @_not_fully_sharded_can_replace
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
@@ -402,18 +396,18 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
 
 
 # These following layers are based on the tensor parallelism strategy given in
-# Y. Sheng et al., S-LoRA: Serving Thousands of Concurrent LoRA Adapters. 2023,
+# Y. Sheng et al., S-OFT: Serving Thousands of Concurrent OFT Adapters. 2023,
 # https://arxiv.org/abs/2311.03285.
 
 
-class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
+class ColumnParallelLinearWithShardedOFT(ColumnParallelLinearWithOFT):
     """
-    Differs from ColumnParallelLinearWithLoRA by slicing LoRA A also.
+    Differs from ColumnParallelLinearWithOFT by slicing OFT A also.
 
-    Based on S-LoRA, slicing happens along the rank dim.
+    Based on S-OFT, slicing happens along the rank dim.
     """
 
-    # For all LoRA layers where the `base_layer` is `ColumnParallelLinear`,
+    # For all OFT layers where the `base_layer` is `ColumnParallelLinear`,
     # their `lora_a` and `lora_b` have different sharding patterns. After
     # completing the `lora_a` GEMM , a gather operation is performed.
     # Therefore, the sharding of `lora_a` only needs to correspond with the
@@ -432,26 +426,26 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
             source_layer=source_layer,
-            lora_config=lora_config,
+            oft_config=oft_config,
             packed_modules_list=packed_modules_list,
             model_config=model_config,
             decorate=False,
         )
 
 
-class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLoRA):
+class MergedColumnParallelLinearWithShardedOFT(MergedColumnParallelLinearWithOFT):
     """
-    Differs from MergedColumnParallelLinearWithLoRA by slicing the
-    LoRA A's also.
+    Differs from MergedColumnParallelLinearWithOFT by slicing the
+    OFT A's also.
 
-    Based on S-LoRA, slicing happens along the rank dim.
+    Based on S-OFT, slicing happens along the rank dim.
     """
 
     def slice_lora_a(
@@ -478,26 +472,26 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
             source_layer=source_layer,
-            lora_config=lora_config,
+            oft_config=oft_config,
             packed_modules_list=packed_modules_list,
             model_config=model_config,
             decorate=False,
         )
 
 
-class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
+class QKVParallelLinearWithShardedOFT(QKVParallelLinearWithOFT):
     """
-    Differs from QKVParallelLinearWithLoRA by slicing the
-    LoRA A's also.
+    Differs from QKVParallelLinearWithOFT by slicing the
+    OFT A's also.
 
-    Based on S-LoRA, slicing happens along the rank dim.
+    Based on S-OFT, slicing happens along the rank dim.
     """
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
@@ -514,26 +508,26 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
             source_layer=source_layer,
-            lora_config=lora_config,
+            oft_config=oft_config,
             packed_modules_list=packed_modules_list,
             model_config=model_config,
             decorate=False,
         )
 
 
-class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
+class MergedQKVParallelLinearWithShardedOFT(MergedQKVParallelLinearWithOFT):
     """
-    Differs from MergedQKVParallelLinearWithLoRA by slicing the
-    LoRA A's also.
+    Differs from MergedQKVParallelLinearWithOFT by slicing the
+    OFT A's also.
 
-    Based on S-LoRA, slicing happens along the rank dim.
+    Based on S-OFT, slicing happens along the rank dim.
     """
 
     def slice_lora_a(
@@ -563,14 +557,14 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
-        lora_config: LoRAConfig,
+        oft_config: OFTConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
             source_layer=source_layer,
-            lora_config=lora_config,
+            oft_config=oft_config,
             packed_modules_list=packed_modules_list,
             model_config=model_config,
             decorate=False,

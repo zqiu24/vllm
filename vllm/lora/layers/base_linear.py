@@ -119,6 +119,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+        if len(self.lora_a_stacked) > 1:
+            print('lora stacked', len(self.lora_a_stacked))
+            print('x shape', x.shape)
+            print('self layer weight shape', self.base_layer.weight.shape)
+            print('output shape', output.shape)
+            exit()
 
         # In Transformers modeling backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),

@@ -1,41 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.lora.layers.base import BaseLayerWithLoRA
-from vllm.lora.layers.column_parallel_linear import (
-    ColumnParallelLinearWithLoRA,
-    ColumnParallelLinearWithShardedLoRA,
-    MergedColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithLoRA,
-    MergedQKVParallelLinearWithShardedLoRA,
-    QKVParallelLinearWithLoRA,
-    QKVParallelLinearWithShardedLoRA,
+from vllm.oft.layers.base import BaseLayerWithOFT
+from vllm.oft.layers.column_parallel_linear import (
+    ColumnParallelLinearWithOFT,
+    ColumnParallelLinearWithShardedOFT,
+    MergedColumnParallelLinearWithOFT,
+    MergedColumnParallelLinearWithShardedOFT,
+    MergedQKVParallelLinearWithOFT,
+    MergedQKVParallelLinearWithShardedOFT,
+    QKVParallelLinearWithOFT,
+    QKVParallelLinearWithShardedOFT,
 )
-from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
-from vllm.lora.layers.logits_processor import LogitsProcessorWithLoRA
-from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
-from vllm.lora.layers.row_parallel_linear import (
-    RowParallelLinearWithLoRA,
-    RowParallelLinearWithShardedLoRA,
+from vllm.oft.layers.fused_moe import FusedMoEWithOFT
+from vllm.oft.layers.logits_processor import LogitsProcessorWithOFT
+from vllm.oft.layers.replicated_linear import ReplicatedLinearWithOFT
+from vllm.oft.layers.row_parallel_linear import (
+    RowParallelLinearWithOFT,
+    RowParallelLinearWithShardedOFT,
 )
-from vllm.lora.layers.utils import LoRAMapping
-from vllm.lora.layers.vocal_parallel_embedding import VocabParallelEmbeddingWithLoRA
+from vllm.oft.layers.utils import OFTMapping
+from vllm.oft.layers.vocal_parallel_embedding import VocabParallelEmbeddingWithOFT
 
 __all__ = [
-    "BaseLayerWithLoRA",
-    "VocabParallelEmbeddingWithLoRA",
-    "LogitsProcessorWithLoRA",
-    "ColumnParallelLinearWithLoRA",
-    "ColumnParallelLinearWithShardedLoRA",
-    "MergedColumnParallelLinearWithLoRA",
-    "MergedColumnParallelLinearWithShardedLoRA",
-    "MergedQKVParallelLinearWithLoRA",
-    "MergedQKVParallelLinearWithShardedLoRA",
-    "QKVParallelLinearWithLoRA",
-    "QKVParallelLinearWithShardedLoRA",
-    "RowParallelLinearWithLoRA",
-    "RowParallelLinearWithShardedLoRA",
-    "ReplicatedLinearWithLoRA",
-    "LoRAMapping",
-    "FusedMoEWithLoRA",
+    "BaseLayerWithOFT",
+    "VocabParallelEmbeddingWithOFT",
+    "LogitsProcessorWithOFT",
+    "ColumnParallelLinearWithOFT",
+    "ColumnParallelLinearWithShardedOFT",
+    "MergedColumnParallelLinearWithOFT",
+    "MergedColumnParallelLinearWithShardedOFT",
+    "MergedQKVParallelLinearWithOFT",
+    "MergedQKVParallelLinearWithShardedOFT",
+    "QKVParallelLinearWithOFT",
+    "QKVParallelLinearWithShardedOFT",
+    "RowParallelLinearWithOFT",
+    "RowParallelLinearWithShardedOFT",
+    "ReplicatedLinearWithOFT",
+    "OFTMapping",
+    "FusedMoEWithOFT",
 ]

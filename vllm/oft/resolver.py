@@ -6,43 +6,43 @@ from collections.abc import Set
 from dataclasses import dataclass, field
 
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import OFTRequest
 
 logger = init_logger(__name__)
 
 
-class LoRAResolver(ABC):
-    """Base class for LoRA adapter resolvers.
+class OFTResolver(ABC):
+    """Base class for OFT adapter resolvers.
 
-    This class defines the interface for resolving and fetching LoRA adapters.
+    This class defines the interface for resolving and fetching OFT adapters.
     Implementations of this class should handle the logic for locating and
-    downloading LoRA adapters from various sources (e.g. S3, cloud storage,
+    downloading OFT adapters from various sources (e.g. S3, cloud storage,
     etc.).
     """
 
     @abstractmethod
     async def resolve_lora(
         self, base_model_name: str, lora_name: str
-    ) -> LoRARequest | None:
-        """Abstract method to resolve and fetch a LoRA model adapter.
+    ) -> OFTRequest | None:
+        """Abstract method to resolve and fetch a OFT model adapter.
 
-        Implements logic to locate and download LoRA adapter based on the name.
+        Implements logic to locate and download OFT adapter based on the name.
         Implementations might fetch from a blob storage or other sources.
 
         Args:
             base_model_name: The name/identifier of the base model to resolve.
-            lora_name: The name/identifier of the LoRA model to resolve.
+            lora_name: The name/identifier of the OFT model to resolve.
 
         Returns:
-            Optional[LoRARequest]: The resolved LoRA model information, or None
-            if the LoRA model cannot be found.
+            Optional[OFTRequest]: The resolved OFT model information, or None
+            if the OFT model cannot be found.
         """
         pass
 
 
 @dataclass
-class _LoRAResolverRegistry:
-    resolvers: dict[str, LoRAResolver] = field(default_factory=dict)
+class _OFTResolverRegistry:
+    resolvers: dict[str, OFTResolver] = field(default_factory=dict)
 
     def get_supported_resolvers(self) -> Set[str]:
         """Get all registered resolver names."""
@@ -51,16 +51,16 @@ class _LoRAResolverRegistry:
     def register_resolver(
         self,
         resolver_name: str,
-        resolver: LoRAResolver,
+        resolver: OFTResolver,
     ) -> None:
-        """Register a LoRA resolver.
+        """Register a OFT resolver.
         Args:
             resolver_name: Name to register the resolver under.
-            resolver: The LoRA resolver instance to register.
+            resolver: The OFT resolver instance to register.
         """
         if resolver_name in self.resolvers:
             logger.warning(
-                "LoRA resolver %s is already registered, and will be "
+                "OFT resolver %s is already registered, and will be "
                 "overwritten by the new resolver instance %s.",
                 resolver_name,
                 resolver,
@@ -68,7 +68,7 @@ class _LoRAResolverRegistry:
 
         self.resolvers[resolver_name] = resolver
 
-    def get_resolver(self, resolver_name: str) -> LoRAResolver:
+    def get_resolver(self, resolver_name: str) -> OFTResolver:
         """Get a registered resolver instance by name.
         Args:
             resolver_name: Name of the resolver to get.
@@ -79,10 +79,10 @@ class _LoRAResolverRegistry:
         """
         if resolver_name not in self.resolvers:
             raise KeyError(
-                f"LoRA resolver '{resolver_name}' not found. "
+                f"OFT resolver '{resolver_name}' not found. "
                 f"Available resolvers: {list(self.resolvers.keys())}"
             )
         return self.resolvers[resolver_name]
 
 
-LoRAResolverRegistry = _LoRAResolverRegistry()
+OFTResolverRegistry = _OFTResolverRegistry()
