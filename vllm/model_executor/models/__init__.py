@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from .interfaces import (HasInnerState, SupportsLoRA, SupportsMRoPE,
+from .interfaces import (HasInnerState, SupportsLoRA, SupportsOFT, SupportsMRoPE,
                          SupportsMultiModal, SupportsPP, SupportsTranscription,
-                         SupportsV0Only, has_inner_state, supports_lora,
+                         SupportsV0Only, has_inner_state, supports_lora, supports_oft,
                          supports_mrope, supports_multimodal, supports_pp,
                          supports_transcription, supports_v0_only)
 from .interfaces_base import (VllmModelForPooling, VllmModelForTextGeneration,
@@ -20,6 +20,8 @@ __all__ = [
     "has_inner_state",
     "SupportsLoRA",
     "supports_lora",
+    "SupportsOFT",
+    "supports_oft",
     "SupportsMultiModal",
     "supports_multimodal",
     "SupportsMRoPE",

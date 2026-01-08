@@ -11,6 +11,7 @@ from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.oft.request import OFTRequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
@@ -46,6 +47,7 @@ class Processor:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.oft_config = vllm_config.oft_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.tokenizer = tokenizer
 
@@ -219,6 +221,23 @@ class Processor:
                 "with its own tokenizer, consider specifying `--tokenizer "
                 "[lora_path]` to use the LoRA tokenizer.")
 
+    def _validate_oft(self, oft_request: Optional[OFTRequest]) -> None:
+        if oft_request is None:
+            return
+
+        # OFT request passed in while OFT is not enabled
+        if not self.oft_config:
+            raise ValueError(f"Got oft_request {oft_request} but OFT is "
+                             "not enabled!")
+
+        if self.tokenizer is not None:
+            logger.warning_once(
+                "vLLM has deprecated support for supporting different "
+                "tokenizers for different OFTs. By default, vLLM uses base "
+                "model's tokenizer. If you are using a OFT "
+                "with its own tokenizer, consider specifying `--tokenizer "
+                "[oft_path]` to use the OFT tokenizer.")
+
     def _validate_structured_output(self, params: SamplingParams) -> None:
         if not params.structured_outputs or not self.structured_outputs_config:
             return
@@ -330,6 +349,7 @@ class Processor:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        oft_request: Optional[OFTRequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
@@ -338,6 +358,7 @@ class Processor:
 
         # TODO(woosuk): Support pooling models.
         self._validate_lora(lora_request)
+        self._validate_oft(oft_request)
         self._validate_params(params)
 
         data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
@@ -371,7 +392,7 @@ class Processor:
                 mm_uuids = None
 
         # Process inputs, which includes:
-        # 1. Tokenize text prompt, with LoRA request if one exists.
+        # 1. Tokenize text prompt, with LoRA / OFT request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
@@ -452,6 +473,7 @@ class Processor:
             eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            oft_request=oft_request,
             cache_salt=decoder_inputs.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,

@@ -20,6 +20,7 @@ from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
+    from vllm.oft.request import OFTRequest
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
@@ -37,6 +38,7 @@ class Request:
         prompt_embeds: Optional[torch.Tensor] = None,
         mm_features: Optional[list[MultiModalFeatureSpec]] = None,
         lora_request: Optional["LoRARequest"] = None,
+        oft_request: Optional["OFTRequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
         priority: int = 0,
@@ -49,9 +51,10 @@ class Request:
         self.priority = priority
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
-        # Because of LoRA, the eos token id can be different for each request.
+        # Because of LoRA / OFT, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
+        self.oft_request = oft_request
         self.structured_output_request = structured_output_request
         self.arrival_time = arrival_time if arrival_time is not None else \
             time.time()
@@ -138,6 +141,7 @@ class Request:
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
+            oft_request=request.oft_request,
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params) \
                     if request.sampling_params else None,

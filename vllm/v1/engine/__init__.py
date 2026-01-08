@@ -10,6 +10,7 @@ import msgspec
 import torch
 
 from vllm.lora.request import LoRARequest
+from vllm.oft.request import OFTRequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -54,6 +55,7 @@ class EngineCoreRequest(
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
+    oft_request: Optional[OFTRequest]
     cache_salt: Optional[str]
     data_parallel_rank: Optional[int]
     prompt_embeds: Optional[torch.Tensor] = None

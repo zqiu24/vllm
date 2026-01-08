@@ -321,6 +321,84 @@ def _supports_lora(model: Union[type[object], object]) -> bool:
 
 
 @runtime_checkable
+class SupportsOFT(Protocol):
+    """The interface required for all models that support OFT."""
+
+    supports_oft: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports OFT.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+    # The `embedding_module` and `embedding_padding_modules`
+    # are empty by default.
+    embedding_modules: ClassVar[dict[str, str]] = {}
+    embedding_padding_modules: ClassVar[list[str]] = []
+    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+
+
+# We can't use runtime_checkable with ClassVar for issubclass checks
+# so we need to treat the class as an instance and use isinstance instead
+@runtime_checkable
+class _SupportsOFTType(Protocol):
+    supports_oft: Literal[True]
+
+    packed_modules_mapping: dict[str, list[str]]
+    embedding_modules: dict[str, str]
+    embedding_padding_modules: list[str]
+
+
+@overload
+def supports_oft(model: type[object]) -> TypeIs[type[SupportsOFT]]:
+    ...
+
+
+@overload
+def supports_oft(model: object) -> TypeIs[SupportsOFT]:
+    ...
+
+
+def supports_oft(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsOFT]], TypeIs[SupportsOFT]]:
+    result = _supports_oft(model)
+
+    if not result:
+        oft_attrs = (
+            "packed_modules_mapping",
+            "embedding_modules",
+            "embedding_padding_modules",
+        )
+        missing_attrs = tuple(attr for attr in oft_attrs
+                              if not hasattr(model, attr))
+
+        if getattr(model, "supports_oft", False):
+            if missing_attrs:
+                logger.warning(
+                    "The model (%s) sets `supports_oft=True`, "
+                    "but is missing OFT-specific attributes: %s",
+                    model,
+                    missing_attrs,
+                )
+        else:
+            if not missing_attrs:
+                logger.warning(
+                    "The model (%s) contains all OFT-specific attributes, "
+                    "but does not set `supports_oft=True`.", model)
+
+    return result
+
+
+def _supports_oft(model: Union[type[object], object]) -> bool:
+    if isinstance(model, type):
+        return isinstance(model, _SupportsOFTType)
+
+    return isinstance(model, SupportsOFT)
+
+
+@runtime_checkable
 class SupportsPP(Protocol):
     """The interface required for all models that support pipeline parallel."""
 

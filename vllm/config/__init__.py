@@ -32,6 +32,7 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.oft import OFTConfig
 from vllm.config.model import (ConvertOption, HfOverrides, LogprobsMode,
                                ModelConfig, ModelDType, ModelImpl,
                                RunnerOption, TaskOption, TokenizerMode,
@@ -107,6 +108,8 @@ class VllmConfig:
     """Load configuration."""
     lora_config: Optional[LoRAConfig] = None
     """LoRA configuration."""
+    oft_config: Optional[OFTConfig] = None
+    """OFT configuration."""
     speculative_config: Optional[SpeculativeConfig] = None
     """Speculative decoding configuration."""
     structured_outputs_config: StructuredOutputsConfig = field(

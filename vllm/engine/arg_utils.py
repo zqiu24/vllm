@@ -26,7 +26,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          Device, DeviceConfig, DistributedExecutorBackend,
                          EPLBConfig, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
+                         LoRAConfig, OFTConfig, MambaDType, MMEncoderTPMode, ModelConfig,
                          ModelDType, ObservabilityConfig, ParallelConfig,
                          PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
@@ -405,6 +405,17 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    # OFT fields
+    enable_oft: bool = False
+    enable_oft_bias: bool = OFTConfig.bias_enabled
+    max_ofts: int = OFTConfig.max_ofts
+    max_oft_block_size: int = OFTConfig.max_oft_block_size
+    default_mm_ofts: Optional[Dict[str, str]] = \
+        OFTConfig.default_mm_ofts
+    fully_sharded_ofts: bool = OFTConfig.fully_sharded_ofts
+    max_cpu_ofts: Optional[int] = OFTConfig.max_cpu_ofts
+    oft_dtype: Optional[Union[str, torch.dtype]] = OFTConfig.oft_dtype
+    oft_extra_vocab_size: int = OFTConfig.oft_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[
@@ -848,6 +859,34 @@ class EngineArgs:
                                 **lora_kwargs["fully_sharded_loras"])
         lora_group.add_argument("--default-mm-loras",
                                 **lora_kwargs["default_mm_loras"])
+
+        # OFT related configs
+        oft_kwargs = get_kwargs(OFTConfig)
+        oft_group = parser.add_argument_group(
+            title="OFTConfig",
+            description=OFTConfig.__doc__,
+        )
+        oft_group.add_argument(
+            "--enable-oft",
+            action=argparse.BooleanOptionalAction,
+            help="If True, enable handling of OFT adapters.")
+        oft_group.add_argument("--enable-oft-bias",
+                                **oft_kwargs["bias_enabled"])
+        oft_group.add_argument("--max-ofts", **oft_kwargs["max_ofts"])
+        oft_group.add_argument("--max-oft-block-size",
+                                **oft_kwargs["max_oft_block_size"])
+        oft_group.add_argument("--oft-extra-vocab-size",
+                                **oft_kwargs["oft_extra_vocab_size"])
+        oft_group.add_argument(
+            "--oft-dtype",
+            **oft_kwargs["oft_dtype"],
+        )
+        oft_group.add_argument("--max-cpu-ofts",
+                                **oft_kwargs["max_cpu_ofts"])
+        oft_group.add_argument("--fully-sharded-ofts",
+                                **oft_kwargs["fully_sharded_ofts"])
+        oft_group.add_argument("--default-mm-ofts",
+                                **oft_kwargs["default_mm_ofts"])
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1384,6 +1423,11 @@ class EngineArgs:
                 "Default modality-specific LoRA(s) were provided for a "
                 "non multimodal model")
 
+        if not model_config.is_multimodal_model and self.default_mm_ofts:
+            raise ValueError(
+                "Default modality-specific OFT(s) were provided for a "
+                "non multimodal model")
+
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
@@ -1394,6 +1438,17 @@ class EngineArgs:
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+
+        oft_config = OFTConfig(
+            bias_enabled=self.enable_oft_bias,
+            max_oft_block_size=self.max_oft_block_size,
+            max_ofts=self.max_ofts,
+            default_mm_ofts=self.default_mm_ofts,
+            fully_sharded_ofts=self.fully_sharded_ofts,
+            oft_extra_vocab_size=self.oft_extra_vocab_size,
+            oft_dtype=self.oft_dtype,
+            max_cpu_ofts=self.max_cpu_ofts if self.max_cpu_ofts
+            and self.max_cpu_ofts > 0 else None) if self.enable_oft else None
 
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
@@ -1435,6 +1490,7 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
+            oft_config=oft_config,
             speculative_config=speculative_config,
             load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,

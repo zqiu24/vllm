@@ -39,6 +39,7 @@ from vllm.inputs import (DataPrompt, PromptType, SingletonPrompt, TextPrompt,
                          TokensPrompt)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.oft.request import OFTRequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
@@ -340,6 +341,7 @@ class LLM:
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]] = None,
         priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
@@ -362,6 +364,7 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            oft_request: OFT request to use for generation, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
 
@@ -390,11 +393,16 @@ class LLM:
         lora_request = self._get_modality_specific_lora_reqs(
             prompts, lora_request)
 
+        # Add any modality specific oft requests to the corresponding prompts
+        oft_request = self._get_modality_specific_oft_reqs(
+            prompts, oft_request)
+
         self._validate_and_add_requests(
             prompts=prompts,
             params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            oft_request=oft_request,
             priority=priority,
         )
 
@@ -428,6 +436,35 @@ class LLM:
                 opt_lora_req,
                 lora_config.default_mm_loras,
             ) for prompt, opt_lora_req in zip(prompts, optional_loras)
+        ]
+
+    def _get_modality_specific_oft_reqs(
+            self, prompts: Union[PromptType, Sequence[PromptType]],
+            oft_request: Optional[Union[list[OFTRequest], OFTRequest]]):
+        # Grab the oft config off the vllm config on the engine,
+        # since this is the same for both v0 & v1.
+        oft_config = self.llm_engine.vllm_config.oft_config
+
+        # If there's no oft config / default_mm_ofts, or the model
+        # isn't multimodal, leave the oft as is.
+        if (oft_config is None
+                or not self.llm_engine.model_config.is_multimodal_model
+                or (oft_config and oft_config.default_mm_ofts is None)):
+            return oft_request
+
+        if not isinstance(prompts, Sequence):
+            prompts = [prompts]
+
+        optional_ofts = ([oft_request] * len(prompts)
+                          if not isinstance(oft_request, Sequence) else
+                          oft_request)
+
+        return [
+            self._resolve_single_prompt_mm_oft(
+                prompt,
+                opt_oft_req,
+                oft_config.default_mm_ofts,
+            ) for prompt, opt_oft_req in zip(prompts, optional_ofts)
         ]
 
     def _resolve_single_prompt_mm_lora(self, prompt: PromptType,
@@ -474,6 +511,52 @@ class LLM:
             modality_name,
             modality_lora_id,
             modality_lora_path,
+        )
+
+    def _resolve_single_prompt_mm_oft(self, prompt: PromptType,
+                                       oft_request: Optional[OFTRequest],
+                                       default_mm_ofts: Optional[dict[str,
+                                                                       str]]):
+        if (not default_mm_ofts or not isinstance(prompt, dict)
+                or "multi_modal_data" not in prompt):
+            return oft_request
+
+        prompt = cast(Union[TextPrompt, TokensPrompt], prompt)
+
+        intersection = set(prompt["multi_modal_data"].keys()) \
+            .intersection(default_mm_ofts.keys())
+        if not intersection:
+            return oft_request
+        if len(intersection) > 1:
+            # TODO: Would be nice to be able to have multiple ofts per prompt
+            logger.warning(
+                "Multiple modality specific ofts were registered and would be"
+                " used by a single prompt consuming several modalities; "
+                " currently we only support one oft per request; as such,"
+                " oft(s) registered with modalities: %s"
+                " will be skipped", intersection)
+            return oft_request
+
+        # Build the OFT request; the ID of the default mm oft is the
+        # index of the modality name sorted alphabetically + 1.
+        modality_name = intersection.pop()
+        modality_oft_path = default_mm_ofts[modality_name]
+        modality_oft_id = sorted(default_mm_ofts).index(modality_name) + 1
+
+        # If we have a collision, warn if there is a collision,
+        # but always send the explicitly provided request.
+        if oft_request:
+            if oft_request.oft_int_id != modality_oft_id:
+                logger.warning(
+                    "A modality with a registered oft and a oft_request "
+                    "with a different ID were provided; falling back to the "
+                    "oft_request as we only apply one OFTRequest per prompt")
+            return oft_request
+
+        return OFTRequest(
+            modality_name,
+            modality_oft_id,
+            modality_oft_path,
         )
 
     def collective_rpc(self,
@@ -535,11 +618,28 @@ class LLM:
 
         raise TypeError(f"Invalid lora_request type {type(lora_request)}")
 
+    def _get_beam_search_oft_requests(
+        self,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]],
+        prompts: list[Union[TokensPrompt, TextPrompt]],
+    ) -> list[Optional[OFTRequest]]:
+        """Get the optional oft request corresponding to each prompt."""
+        if isinstance(oft_request,
+                      Sequence) and len(oft_request) != len(prompts):
+            raise ValueError(
+                "Oft request list should be the same length as the prompts")
+
+        if oft_request is None or isinstance(oft_request, OFTRequest):
+            return [oft_request] * len(prompts)
+
+        raise TypeError(f"Invalid oft_request type {type(oft_request)}")
+
     def beam_search(
         self,
         prompts: list[Union[TokensPrompt, TextPrompt]],
         params: BeamSearchParams,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]] = None,
         use_tqdm: bool = False,
         concurrency_limit: Optional[int] = None,
     ) -> list[BeamSearchOutput]:
@@ -551,6 +651,7 @@ class LLM:
                 of token IDs.
             params: The beam search parameters.
             lora_request: LoRA request to use for generation, if any.
+            oft_request: OFT request to use for generation, if any.
             use_tqdm: Whether to use tqdm to display the progress bar.
             concurrency_limit: The maximum number of concurrent requests.
                 If None, the number of concurrent requests is unlimited.
@@ -565,6 +666,9 @@ class LLM:
 
         lora_requests = self._get_beam_search_lora_requests(
             lora_request, prompts)
+
+        oft_requests = self._get_beam_search_oft_requests(
+            oft_request, prompts)
 
         tokenizer = self.get_tokenizer()
         sort_beams_key = create_sort_beams_key_function(
@@ -602,7 +706,7 @@ class LLM:
                                             temperature=temperature)
         instances: list[BeamSearchInstance] = []
 
-        for lora_req, prompt in zip(lora_requests, prompts):
+        for lora_req, oft_req, prompt in zip(lora_requests, oft_requests, prompts):
             # Add multimodal processor kwargs & data
             mm_kwargs = {}
             if "multi_modal_data" in prompt:
@@ -621,6 +725,7 @@ class LLM:
                 BeamSearchInstance(
                     prompt_tokens,
                     lora_request=lora_req,
+                    oft_request=oft_req,
                     logprobs=None,
                     **mm_kwargs,
                 ), )
@@ -651,9 +756,9 @@ class LLM:
                 if len(all_beams) == 0:
                     break
 
-                # create corresponding batch entries for prompt & optional lora
-                prompts_batch, lora_req_batch = zip(
-                    *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
+                # create corresponding batch entries for prompt & optional lora & oft
+                prompts_batch, lora_req_batch, oft_req_batch = zip(
+                    *[(create_tokens_prompt_from_beam(beam), beam.lora_request, beam.oft_request)
                       for beam in all_beams])
 
                 # only runs for one step
@@ -661,7 +766,8 @@ class LLM:
                 output = self.generate(prompts_batch,
                                        sampling_params=beam_search_params,
                                        use_tqdm=False,
-                                       lora_request=lora_req_batch)
+                                       lora_request=lora_req_batch,
+                                       oft_request=oft_req_batch)
 
                 for (start, end), instance in zip(instance_start_and_end,
                                                   instances_batch):
@@ -682,6 +788,7 @@ class LLM:
                                     logprobs=current_beam.logprobs +
                                     [logprobs],
                                     lora_request=current_beam.lora_request,
+                                    oft_request=current_beam.oft_request,
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     multi_modal_data=current_beam.
@@ -820,6 +927,7 @@ class LLM:
                                         list[SamplingParams]]] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[LoRARequest] = None,
+        oft_request: Optional[OFTRequest] = None,
         chat_template: Optional[str] = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
@@ -854,6 +962,7 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            oft_request: OFT request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
                 If not provided, the model's default chat template will be used.
             chat_template_content_format: The format to render message content.
@@ -895,6 +1004,7 @@ class LLM:
             sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            oft_request=oft_request,
         )
 
     def encode(
@@ -906,6 +1016,7 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]] = None,
         pooling_task: PoolingTask = "encode",
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
@@ -927,6 +1038,7 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            oft_request: OFT request to use for generation, if any.
             pooling_task: Override the pooling task to use.
             tokenization_kwargs: overrides tokenization_kwargs set in
                 pooling_params
@@ -1006,6 +1118,7 @@ class LLM:
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            oft_request=oft_request,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -1037,6 +1150,7 @@ class LLM:
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]] = None,
     ) -> list[EmbeddingRequestOutput]:
         """
         Generate an embedding vector for each prompt.
@@ -1056,6 +1170,7 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            oft_request: OFT request to use for generation, if any.
 
         Returns:
             A list of `EmbeddingRequestOutput` objects containing the
@@ -1072,6 +1187,7 @@ class LLM:
             use_tqdm=use_tqdm,
             pooling_params=pooling_params,
             lora_request=lora_request,
+            oft_request=oft_request,
             pooling_task="embed",
         )
 
@@ -1085,6 +1201,7 @@ class LLM:
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]] = None,
     ) -> list[ClassificationRequestOutput]:
         """
         Generate class logits for each prompt.
@@ -1102,6 +1219,7 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            oft_request: OFT request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
         Returns:
@@ -1118,6 +1236,7 @@ class LLM:
             use_tqdm=use_tqdm,
             pooling_params=pooling_params,
             lora_request=lora_request,
+            oft_request=oft_request,
             pooling_task="classify",
         )
 
@@ -1133,6 +1252,7 @@ class LLM:
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]] = None,
     ) -> list[PoolingRequestOutput]:
         """
         Generate rewards for each prompt.
@@ -1146,6 +1266,7 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            oft_request: OFT request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
         Returns:
@@ -1157,6 +1278,7 @@ class LLM:
             prompts,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            oft_request=oft_request,
             pooling_params=pooling_params,
             truncate_prompt_tokens=truncate_prompt_tokens,
             pooling_task="encode",
@@ -1171,6 +1293,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]] = None,
     ) -> list[ScoringRequestOutput]:
 
         encoded_output: list[PoolingRequestOutput] = self.encode(
@@ -1178,6 +1301,7 @@ class LLM:
             truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            oft_request=oft_request,
             pooling_params=pooling_params,
             pooling_task="embed",
         )
@@ -1207,6 +1331,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]] = None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.llm_engine.model_config
 
@@ -1259,6 +1384,7 @@ class LLM:
             params=pooling_params_list,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            oft_request=oft_request,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -1279,6 +1405,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        oft_request: Optional[Union[list[OFTRequest], OFTRequest]] = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -1309,6 +1436,7 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
+            oft_request: OFT request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
         Returns:
@@ -1395,7 +1523,8 @@ class LLM:
                 truncate_prompt_tokens,
                 use_tqdm,
                 pooling_params,
-                lora_request)
+                lora_request,
+                oft_request)
         else:
             return self._embedding_score(
                 tokenizer,
@@ -1404,7 +1533,8 @@ class LLM:
                 truncate_prompt_tokens,
                 use_tqdm,
                 pooling_params,
-                lora_request)
+                lora_request,
+                oft_request)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
@@ -1471,6 +1601,7 @@ class LLM:
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
+        oft_request: Optional[Union[Sequence[OFTRequest], OFTRequest]],
         priority: Optional[list[int]] = None,
     ) -> None:
         if isinstance(prompts, (str, dict)):
@@ -1484,6 +1615,11 @@ class LLM:
         if isinstance(lora_request,
                       Sequence) and len(lora_request) != num_requests:
             raise ValueError("The lengths of prompts and lora_request "
+                             "must be the same.")
+
+        if isinstance(oft_request,
+                      Sequence) and len(oft_request) != num_requests:
+            raise ValueError("The lengths of prompts and oft_request "
                              "must be the same.")
 
         for sp in params if isinstance(params, Sequence) else (params, ):
@@ -1519,6 +1655,8 @@ class LLM:
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
+                oft_request=oft_request[i] if isinstance(
+                    oft_request, Sequence) else oft_request,
                 priority=priority[i] if priority else 0,
             )
 
@@ -1563,6 +1701,7 @@ class LLM:
         params: Union[SamplingParams, PoolingParams],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
+        oft_request: Optional[OFTRequest] = None,
         priority: int = 0,
     ) -> None:
         request_id = str(next(self.request_counter))
@@ -1571,6 +1710,7 @@ class LLM:
             prompt,
             params,
             lora_request=lora_request,
+            oft_request=oft_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )

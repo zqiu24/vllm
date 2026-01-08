@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.lora.request import LoRARequest
+    from vllm.oft.request import OFTRequest
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
@@ -26,6 +27,7 @@ else:
     ModelConfig = None
     VllmConfig = None
     LoRARequest = None
+    OFTRequest = None
     PoolingParams = None
     SamplingParams = None
     FlexibleArgumentParser = None
@@ -417,6 +419,13 @@ class Platform:
     def get_lora_vocab_padding_size(cls) -> int:
         """
         Returns how much padding the LoRA logits need for kernels
+        """
+        return 256
+
+    @classmethod
+    def get_oft_vocab_padding_size(cls) -> int:
+        """
+        Returns how much padding the OFT logits need for kernels
         """
         return 256
 

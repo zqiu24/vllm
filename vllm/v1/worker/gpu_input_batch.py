@@ -10,6 +10,7 @@ import torch
 from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
+from vllm.oft.request import OFTRequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItems
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -43,6 +44,7 @@ class CachedRequestState:
     mrope_position_delta: Optional[int] = None
 
     lora_request: Optional[LoRARequest] = None
+    oft_request: Optional[OFTRequest] = None
     prompt_embeds: Optional[torch.Tensor] = None
 
     def __post_init__(self):
@@ -232,6 +234,12 @@ class InputBatch:
                                              dtype=np.int32)
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
+
+        # oft related
+        self.request_oft_mapping = np.zeros((self.max_num_reqs, ),
+                                             dtype=np.int32)
+        self.oft_id_to_request_ids: dict[int, set[str]] = {}
+        self.oft_id_to_oft_request: dict[int, OFTRequest] = {}
 
         # req_index -> generator
         # NOTE(woosuk): The indices of the requests that do not have their own
@@ -443,6 +451,19 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
+        # Add request oft ID
+        if request.oft_request:
+            oft_id = request.oft_request.oft_int_id
+            if oft_id not in self.oft_id_to_request_ids:
+                self.oft_id_to_request_ids[oft_id] = set()
+
+            self.request_oft_mapping[req_index] = oft_id
+            self.oft_id_to_request_ids[oft_id].add(request.req_id)
+            self.oft_id_to_oft_request[oft_id] = request.oft_request
+        else:
+            # No OFT
+            self.request_oft_mapping[req_index] = 0
+
         return req_index
 
     def remove_request(self, req_id: str) -> Optional[int]:
@@ -463,7 +484,7 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
-        # LoRA
+        # LoRA / OFT
         lora_id = self.request_lora_mapping[req_index]
         if lora_id != 0:
             lora_req_ids = self.lora_id_to_request_ids[lora_id]
@@ -472,6 +493,15 @@ class InputBatch:
                 del self.lora_id_to_request_ids[lora_id]
                 del self.lora_id_to_lora_request[lora_id]
             self.request_lora_mapping[req_index] = 0
+
+        oft_id = self.request_oft_mapping[req_index]
+        if oft_id != 0:
+            oft_req_ids = self.oft_id_to_request_ids[oft_id]
+            oft_req_ids.discard(req_id)
+            if not oft_req_ids:
+                del self.oft_id_to_request_ids[oft_id]
+                del self.oft_id_to_oft_request[oft_id]
+            self.request_oft_mapping[req_index] = 0
 
         if self.is_pooling_model:
             self.pooling_params.pop(req_id, None)
@@ -543,6 +573,9 @@ class InputBatch:
 
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] = \
             self.request_lora_mapping[i2], self.request_lora_mapping[i1]
+
+        self.request_oft_mapping[i1], self.request_oft_mapping[i2] = \
+            self.request_oft_mapping[i2], self.request_oft_mapping[i1]
 
         if self.is_pooling_model:
             # Sampling and logits parameters don't apply to pooling models.
@@ -643,6 +676,8 @@ class InputBatch:
             self.block_table.move_row(last_req_index, empty_index)
 
             self.request_lora_mapping[empty_index] = self.request_lora_mapping[
+                last_req_index]
+            self.request_oft_mapping[empty_index] = self.request_oft_mapping[
                 last_req_index]
 
             if self.is_pooling_model:
@@ -823,6 +858,29 @@ class InputBatch:
             self.lora_id_to_lora_request.values())
 
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+
+    def make_oft_inputs(
+        self, num_scheduled_tokens: np.ndarray
+    ) -> tuple[tuple[int, ...], tuple[int, ...], set[OFTRequest]]:
+        """
+        Given the num_scheduled_tokens for each request in the batch, return
+        datastructures used to activate the current OFTs.
+        Returns:
+            1. prompt_oft_mapping: A tuple of size self.num_reqs where,
+               prompt_oft_mapping[i] is the OFT id to use for the ith prompt.
+            2. token_oft_mapping: A tuple of size np.sum(num_scheduled_tokens)
+               where, token_oft_mapping[i] is the OFT id to use for ith token.
+            3. oft_requests: Set of relevant OFT requests.
+        """
+
+        req_oft_mapping = self.request_oft_mapping[:self.num_reqs]
+        prompt_oft_mapping = tuple(req_oft_mapping)
+        token_oft_mapping = tuple(
+            req_oft_mapping.repeat(num_scheduled_tokens))
+        active_oft_requests: set[OFTRequest] = set(
+            self.oft_id_to_oft_request.values())
+
+        return prompt_oft_mapping, token_oft_mapping, active_oft_requests
 
     @property
     def num_reqs(self) -> int:

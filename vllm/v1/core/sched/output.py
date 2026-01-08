@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
+    from vllm.oft.request import OFTRequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -34,6 +35,7 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    oft_request: Optional[OFTRequest]
     prompt_embeds: Optional[torch.Tensor] = None
 
     @classmethod
@@ -51,6 +53,7 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            oft_request=request.oft_request,
             prompt_embeds=request.prompt_embeds,
         )
 
@@ -65,6 +68,7 @@ class NewRequestData:
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
+                f"oft_request={self.oft_request},"
                 f"prompt_embeds_shape={prompt_embeds_shape}"
                 ")")
 
@@ -83,6 +87,7 @@ class NewRequestData:
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
+                f"oft_request={self.oft_request},"
                 f"prompt_embeds_shape={prompt_embeds_shape}"
                 ")")
 

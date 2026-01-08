@@ -17,6 +17,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.oft.request import OFTRequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
@@ -217,6 +218,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        oft_request: Optional[OFTRequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
@@ -228,7 +230,7 @@ class LLMEngine:
 
         # Process raw inputs into the request.
         prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
+            request_id, prompt, params, arrival_time, lora_request, oft_request,
             tokenization_kwargs, trace_headers, priority)
 
         n = params.n if isinstance(params, SamplingParams) else 1
@@ -353,6 +355,22 @@ class LLMEngine:
     def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
         return self.engine_core.pin_lora(lora_id)
+
+    def add_oft(self, oft_request: OFTRequest) -> bool:
+        """Load a new OFT adapter into the engine for future requests."""
+        return self.engine_core.add_oft(oft_request)
+
+    def remove_oft(self, oft_id: int) -> bool:
+        """Remove an already loaded OFT adapter."""
+        return self.engine_core.remove_oft(oft_id)
+
+    def list_ofts(self) -> set[int]:
+        """List all registered adapters."""
+        return self.engine_core.list_ofts()
+
+    def pin_oft(self, oft_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return self.engine_core.pin_oft(oft_id)
 
     def collective_rpc(self,
                        method: Union[str, Callable[[WorkerBase], _R]],
